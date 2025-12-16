@@ -12,7 +12,7 @@ using OpenTelemetry.Metrics;
 using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
 using OpenTelemetry.Logs;
-using OpenTelemetry.Instrumentation.Process;
+// OpenTelemetry.Instrumentation.Process removed - no stable version available
 using OpenTelemetry;
 using Serilog;
 using MigrationTools.Options;
@@ -167,7 +167,6 @@ namespace MigrationTools.Services
                              .AddMeter("MigrationTools.TestPlans", WorkItemMetrics.meterName, ProcessorMetrics.meterName)
                              .AddHttpClientInstrumentation()
                              .AddRuntimeInstrumentation()
-                             .AddProcessInstrumentation()
                              //.AddConsoleExporter() // Export metrics to console
                              .AddAzureMonitorMetricExporter(options =>
                              {

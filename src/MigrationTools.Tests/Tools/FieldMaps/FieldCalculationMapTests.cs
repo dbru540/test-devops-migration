@@ -116,8 +116,8 @@ namespace MigrationTools.Tests.Tools.FieldMaps
             // Arrange
             var expression = new Expression("[x] + [");  // Invalid syntax
 
-            // Act & Assert - NCalc throws EvaluationException for invalid syntax
-            Assert.ThrowsException<NCalc.EvaluationException>(() => expression.Evaluate());
+            // Act & Assert - NCalcSync throws NCalcException for invalid syntax
+            Assert.ThrowsException<NCalc.Exceptions.NCalcException>(() => expression.Evaluate());
         }
 
         [TestMethod]

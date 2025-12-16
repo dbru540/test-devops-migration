@@ -48,7 +48,6 @@
     <PackageReference Include="Newtonsoft.Json.Schema" />
     <PackageReference Include="OpenTelemetry.Extensions.Hosting" />
     <PackageReference Include="OpenTelemetry.Instrumentation.Http" />
-    <PackageReference Include="OpenTelemetry.Instrumentation.Process" />
     <PackageReference Include="OpenTelemetry.Instrumentation.Runtime" />
     <PackageReference Include="Serilog" />
     <PackageReference Include="System.ComponentModel.Annotations" />
