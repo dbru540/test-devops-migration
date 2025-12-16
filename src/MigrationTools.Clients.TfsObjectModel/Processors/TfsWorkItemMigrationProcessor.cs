@@ -671,7 +671,8 @@ namespace MigrationTools.Processors
             if (targetWorkItem != null && CommonTools.Attachment.Enabled && sourceWorkItem.ToWorkItem().Attachments.Count > 0)
             {
                 TraceWriteLine(LogEventLevel.Information, "Attachemnts {SourceWorkItemAttachmentCount} | LinkMigrator:{AttachmentMigration}", new Dictionary<string, object>() { { "SourceWorkItemAttachmentCount", sourceWorkItem.ToWorkItem().Attachments.Count }, { "AttachmentMigration", CommonTools.Attachment.Enabled } });
-                CommonTools.Attachment.ProcessAttachemnts(this, sourceWorkItem, targetWorkItem, save);
+                // Use SmartProcessAttachments for intelligent duplicate handling with MD5 checksums
+                CommonTools.Attachment.SmartProcessAttachments(this, sourceWorkItem, targetWorkItem, save);
                 //AddMetric("Attachments", processWorkItemMetrics, targetWorkItem.ToWorkItem().AttachedFileCount);
             }
         }

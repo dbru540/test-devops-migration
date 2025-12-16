@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
@@ -36,27 +37,39 @@ namespace MigrationTools.Tools
             _cachedUploadedUrisBySourceValue = new System.Collections.Concurrent.ConcurrentDictionary<string, string>(StringComparer.InvariantCultureIgnoreCase);
         }
 
-        public void FixEmbededImages(TfsProcessor processor, WorkItemData targetWorkItem)
+        public int FixEmbededImages(TfsProcessor processor, WorkItemData targetWorkItem)
         {
-            static string GenerateAuthToken(string username, string password)
-                => Convert.ToBase64String(Encoding.ASCII.GetBytes($"{username}:{password}"));
-
             _processor = processor;
             _targetProject = processor.Target.WorkItems.Project.ToProject();
-
-            string? accessToken = null;
-            if (processor.Source.Options.Authentication.AuthenticationMode == AuthenticationMode.AccessToken)
+            
+            string? accessToken = processor.Source.Options.Authentication.AuthenticationMode switch
             {
-                accessToken = GenerateAuthToken(string.Empty, processor.Source.Options.Authentication.AccessToken);
-            }
-            else if (processor.Source.Options.Authentication.AuthenticationMode == AuthenticationMode.Windows)
+                AuthenticationMode.AccessToken => processor.Source.Options.Authentication.AccessToken,
+                AuthenticationMode.Windows => GetWindowsAuthToken(processor.Source.Options.Authentication.NetworkCredentials),
+                _ => null
+            };
+            
+            // Call the protected override method
+            FixEmbededImages(targetWorkItem, 
+                processor.Source.Options.Collection.AbsoluteUri, 
+                processor.Target.Options.Collection.AbsoluteUri, 
+                accessToken);
+            
+            // DON'T SAVE HERE - Let the processor handle saving
+            // The work item will be saved later in the attachment processing
+            var workItem = targetWorkItem.ToWorkItem();
+            if (workItem.IsDirty)
             {
-                NetworkCredentials credentials = processor.Source.Options.Authentication.NetworkCredentials;
-                accessToken = GenerateAuthToken($"{credentials.Domain}\\{credentials.UserName}", credentials.Password);
+                Log.LogError("⚠️ EMBEDDED IMAGES MODIFIED - Work item {Id} has pending changes that will be saved during attachment processing", 
+                    targetWorkItem.Id);
+                return 1;
             }
-
-            FixEmbededImages(targetWorkItem, processor.Source.Options.Collection.AbsoluteUri, processor.Target.Options.Collection.AbsoluteUri, accessToken);
+            
+            return 0;
         }
+
+        private string GetWindowsAuthToken(NetworkCredentials cred)
+            => Convert.ToBase64String(Encoding.ASCII.GetBytes($"{cred.Domain}\\{cred.UserName}:{cred.Password}"));
 
         public void ProcessorExecutionEnd(TfsProcessor processor)
         {
@@ -69,62 +82,216 @@ namespace MigrationTools.Tools
         }
 
         /**
-      *  from https://gist.github.com/pietergheysens/792ed505f09557e77ddfc1b83531e4fb
-      */
+         *  from https://gist.github.com/pietergheysens/792ed505f09557e77ddfc1b83531e4fb
+        */
 
         protected override void FixEmbededImages(WorkItemData wi, string oldTfsurl, string newTfsurl, string sourcePersonalAccessToken = "")
         {
-            Log.LogInformation("EmbededImagesRepairEnricher: Fixing HTML field attachments for work item {Id} from {OldTfsurl} to {NewTfsUrl}", wi.Id, oldTfsurl, newTfsurl);
+            Log.LogInformation("EmbededImagesRepairEnricher: Fixing HTML field attachments for work item {Id} from {OldTfsurl} to {NewTfsUrl}", 
+                wi.Id, oldTfsurl, newTfsurl);
 
-            var oldTfsurlOppositeSchema = GetUrlWithOppositeSchema(oldTfsurl);
+            // Extract the target organization - ALL images must be in this org
+            string targetOrg = ExtractOrganization(newTfsurl);
+            Log.LogInformation("Target organization where ALL images should be hosted: {TargetOrg}", targetOrg);
 
-            foreach (Field field in wi.ToWorkItem().Fields)
+            var workItem = wi.ToWorkItem();
+            bool anyChanges = false;
+
+            // Check ALL fields including System.History (comments)
+            foreach (Field field in workItem.Fields)
             {
-                if (field.FieldDefinition.FieldType != FieldType.Html && field.FieldDefinition.FieldType != FieldType.History)
+                // Include all HTML fields AND specifically System.History
+                bool shouldProcess = false;
+                
+                if (field.FieldDefinition.FieldType == FieldType.Html)
+                {
+                    shouldProcess = true;
+                }
+                else if (field.ReferenceName == "System.History")
+                {
+                    // Comments/History field
+                    shouldProcess = true;
+                    Log.LogWarning("Checking System.History (Comments) field for embedded images");
+                }
+                else if (field.FieldDefinition.FieldType == FieldType.History)
+                {
+                    shouldProcess = true;
+                }
+                
+                if (!shouldProcess)
                     continue;
 
                 try
                 {
-                    MatchCollection matches = Regex.Matches((string)field.Value, RegexPatternForImageUrl);
+                    string originalValue = (string)field.Value;
+                    if (string.IsNullOrEmpty(originalValue))
+                        continue;
+
+                    // LOG THE ACTUAL CONTENT TO SEE WHAT WE'RE DEALING WITH
+                    if (originalValue.Contains("dev.azure.com"))
+                    {
+                        Log.LogWarning("Field {FieldName} ({RefName}) contains dev.azure.com URLs", 
+                            field.Name, field.ReferenceName);
+                        
+                        // Check specifically for fiveforty URLs
+                        if (originalValue.Contains("dev.azure.com/fiveforty"))
+                        {
+                            Log.LogError("❌ FOUND FIVEFORTY URL in field {FieldName}!", field.Name);
+                        }
+                        
+                        // Log a sample of the content
+                        var sample = originalValue.Length > 500 ? originalValue.Substring(0, 500) : originalValue;
+                        Log.LogDebug("Field content sample: {Sample}", sample);
+                    }
+
+                    string modifiedValue = originalValue;
+                    
+                    // Try a more aggressive pattern to find ALL Azure DevOps URLs
+                    string pattern = @"https://dev\.azure\.com/[^/]+/[^""'\s<>]+";
+                    MatchCollection matches = Regex.Matches(originalValue, pattern);
+                    
+                    Log.LogWarning("Found {Count} Azure DevOps URLs in field {FieldName} ({RefName})", 
+                        matches.Count, field.Name, field.ReferenceName);
+                    
                     foreach (Match match in matches)
                     {
-                        if (!match.Value.ToLower().Contains(oldTfsurl.ToLower()) && !match.Value.ToLower().Contains(oldTfsurlOppositeSchema.ToLower()))
-                            continue;
-
-                        string newImageLink = "";
-                        if (_cachedUploadedUrisBySourceValue.ContainsKey(match.Value))
+                        string imageUrl = match.Value;
+                        
+                        // Clean up any HTML encoded characters
+                        imageUrl = System.Net.WebUtility.HtmlDecode(imageUrl);
+                        
+                        Log.LogWarning("Found URL: {Url}", imageUrl);
+                        
+                        // Extract organization
+                        string imageOrg = ExtractOrganization(imageUrl);
+                        Log.LogWarning("URL organization: {Org}, Target organization: {Target}", imageOrg, targetOrg);
+                        
+                        // Check if it's an attachment URL and from wrong org
+                        if (imageUrl.Contains("/_apis/wit/attachments/") && 
+                            !imageOrg.Equals(targetOrg, StringComparison.OrdinalIgnoreCase))
                         {
-                            newImageLink = _cachedUploadedUrisBySourceValue[match.Value];
+                            Log.LogError("❌ WRONG ORG ATTACHMENT: {Url} is from {WrongOrg} but should be {CorrectOrg}", 
+                                imageUrl, imageOrg, targetOrg);
+                            
+                            // Force replacement
+                            string cacheKey = $"{imageUrl}→{targetOrg}";
+                            string newImageLink = "";
+                            
+                            if (_cachedUploadedUrisBySourceValue.ContainsKey(cacheKey))
+                            {
+                                newImageLink = _cachedUploadedUrisBySourceValue[cacheKey];
+                            }
+                            else
+                            {
+                                try
+                                {
+                                    string downloadToken = DetermineAccessToken(imageUrl, sourcePersonalAccessToken);
+                                    newImageLink = UploadedAndRetrieveAttachmentLinkUrl(imageUrl, field.Name, wi, downloadToken);
+                                    
+                                    if (!string.IsNullOrWhiteSpace(newImageLink))
+                                    {
+                                        _cachedUploadedUrisBySourceValue[cacheKey] = newImageLink;
+                                        Log.LogError("✅ UPLOADED: New URL is {NewUrl}", newImageLink);
+                                    }
+                                }
+                                catch (Exception ex)
+                                {
+                                    Log.LogError(ex, "Failed to reupload image");
+                                    if (_ignore404Errors) continue;
+                                    throw;
+                                }
+                            }
+                            
+                            if (!string.IsNullOrWhiteSpace(newImageLink))
+                            {
+                                // Replace both the original URL and any HTML-encoded version
+                                modifiedValue = modifiedValue.Replace(match.Value, newImageLink);
+                                modifiedValue = modifiedValue.Replace(System.Net.WebUtility.HtmlEncode(match.Value), newImageLink);
+                                anyChanges = true;
+                                Log.LogError("✅ REPLACED in content: {Old} -> {New}", imageUrl, newImageLink);
+                            }
                         }
-                        else
+                        else if (!imageOrg.Equals(targetOrg, StringComparison.OrdinalIgnoreCase))
                         {
-                            // go upload and get newImageLink
-                            newImageLink = UploadedAndRetrieveAttachmentLinkUrl(match.Value, field.Name, wi, sourcePersonalAccessToken);
-
-                            // if unable to store/upload the link, should we cache that result? so the next revision will either just ignore it or try again
-                            //   for now, i think the best option is to set it to null so we don't retry an upload, with the assumption being that the next
-                            //   upload will most likely fail and just cause the revision process to take longer
-                            _cachedUploadedUrisBySourceValue[match.Value] = newImageLink;
+                            // Not an attachment but still wrong org
+                            Log.LogWarning("Found non-attachment URL from wrong org: {Url}", imageUrl);
                         }
-
-                        if (!string.IsNullOrWhiteSpace(newImageLink))
-                        {
-                            // the match.Value was either just uploaded or uploaded most likely because of a previous revision. we can replace it
-                            field.Value = field.Value.ToString().Replace(match.Value, newImageLink);
-                        }
+                    }
+                    
+                    // Update field if changed
+                    if (modifiedValue != originalValue)
+                    {
+                        field.Value = modifiedValue;
+                        Log.LogError("✅ FIELD {FieldName} ({RefName}) UPDATED with new URLs", 
+                            field.Name, field.ReferenceName);
                     }
                 }
                 catch (Exception ex)
                 {
-                    Log.LogError(ex, "EmbededImagesRepairEnricher: Unable to fix HTML field attachments for work item {wiId} from {oldTfsurl} to {newTfsurl}", wi.Id, oldTfsurl, newTfsurl);
-                    Telemetry.TrackException(ex, null);
+                    Log.LogError(ex, "Error processing field {FieldName} ({RefName})", 
+                        field.Name, field.ReferenceName);
                 }
+            }
+            
+            // ALSO check the work item revisions/comments history
+            if (workItem.Revisions.Count > 0)
+            {
+                Log.LogWarning("Checking {Count} revisions for embedded images in comments", workItem.Revisions.Count);
+                
+                // Get the latest revision (current state)
+                var latestRevision = workItem.Revisions[workItem.Revisions.Count - 1];
+                if (latestRevision.Fields.Contains("System.History"))
+                {
+                    string historyValue = (string)latestRevision.Fields["System.History"].Value;
+                    if (!string.IsNullOrEmpty(historyValue) && historyValue.Contains("dev.azure.com/fiveforty"))
+                    {
+                        Log.LogError("❌ FOUND FIVEFORTY URL in revision history/comments!");
+                        // Note: History field is read-only in revisions, we need to add a new comment to fix it
+                    }
+                }
+            }
+            
+            if (anyChanges)
+            {
+                Log.LogError("⚠️ CHANGES MADE - Work item {Id} needs to be saved!", wi.Id);
+            }
+            else
+            {
+                Log.LogWarning("ℹ️ NO CHANGES - All images already correct or no images found");
+            }
+        }
+
+        private bool IsFromWrongOrganization(string imageUrl, string expectedOrgUrl)
+        {
+            try
+            {
+                // Extract organization from URLs
+                string imageOrg = ExtractOrganization(imageUrl);
+                string expectedOrg = ExtractOrganization(expectedOrgUrl);
+                
+                if (string.IsNullOrEmpty(imageOrg) || string.IsNullOrEmpty(expectedOrg))
+                    return false;
+                
+                // If the organizations don't match, the URL needs to be fixed
+                bool isWrong = !imageOrg.Equals(expectedOrg, StringComparison.OrdinalIgnoreCase);
+                
+                if (isWrong)
+                {
+                    Log.LogWarning("Image organization mismatch. Image is from '{ImageOrg}' but should be '{ExpectedOrg}'", 
+                        imageOrg, expectedOrg);
+                }
+                
+                return isWrong;
+            }
+            catch (Exception ex)
+            {
+                Log.LogError(ex, "Error checking organization for URL: {Url}", imageUrl);
+                return false;
             }
         }
 
         private string UploadedAndRetrieveAttachmentLinkUrl(string matchedSourceUri, string sourceFieldName, WorkItemData targetWorkItem, string sourcePersonalAccessToken)
         {
-            // save image locally and upload as attachment
             Match newFileNameMatch = Regex.Match(matchedSourceUri, RegexPatternForImageFileName, RegexOptions.IgnoreCase);
             if (!newFileNameMatch.Success) return null;
 
@@ -133,53 +300,258 @@ namespace MigrationTools.Tools
 
             try
             {
-                using (var httpClient = new HttpClient(_httpClientHandler, false))
+                // Create a handler that allows redirects
+                var handler = new HttpClientHandler
                 {
-                    if (!string.IsNullOrEmpty(sourcePersonalAccessToken))
-                    {
-                        httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", sourcePersonalAccessToken);
-                    }
+                    AllowAutoRedirect = true,
+                    MaxAutomaticRedirections = 5,
+                    AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate,
+                    UseDefaultCredentials = false
+                };
 
+                using (var httpClient = new HttpClient(handler))
+                {
+                    httpClient.Timeout = TimeSpan.FromMinutes(2);
+                    
+                    // Determine the correct authentication based on the URL being accessed
+                    string accessToken = DetermineAccessToken(matchedSourceUri, sourcePersonalAccessToken);
+                    
+                    if (!string.IsNullOrEmpty(accessToken))
+                    {
+                        // Check if it's already in Basic format or needs encoding
+                        if (accessToken.StartsWith("Basic "))
+                        {
+                            httpClient.DefaultRequestHeaders.Authorization = 
+                                new AuthenticationHeaderValue("Basic", accessToken.Substring(6));
+                        }
+                        else if (accessToken.Contains(":"))
+                        {
+                            // Already in user:password or :pat format
+                            var encodedPat = Convert.ToBase64String(Encoding.ASCII.GetBytes(accessToken));
+                            httpClient.DefaultRequestHeaders.Authorization = 
+                                new AuthenticationHeaderValue("Basic", encodedPat);
+                        }
+                        else
+                        {
+                            // Just a PAT token
+                            var encodedPat = Convert.ToBase64String(Encoding.ASCII.GetBytes($":{accessToken}"));
+                            httpClient.DefaultRequestHeaders.Authorization = 
+                                new AuthenticationHeaderValue("Basic", encodedPat);
+                        }
+                    }
+                    else
+                    {
+                        Log.LogWarning("No authentication token found for URL: {Url}", matchedSourceUri);
+                    }
+                    
+                    // Add Azure DevOps specific headers
+                    httpClient.DefaultRequestHeaders.Add("X-TFS-FedAuthRedirect", "Suppress");
+                    
                     var result = DownloadFile(httpClient, matchedSourceUri, fullImageFilePath);
+                    
                     if (!result.IsSuccessStatusCode)
                     {
                         if (_ignore404Errors && result.StatusCode == HttpStatusCode.NotFound)
                         {
-                            Log.LogDebug("EmbededImagesRepairEnricher: Image {MatchValue} could not be found in WorkItem {WorkItemId}, Field {FieldName}", matchedSourceUri, targetWorkItem.Id, sourceFieldName);
+                            Log.LogDebug("Image not found (404): {Uri}", matchedSourceUri);
                             return null;
+                        }
+                        else if (result.StatusCode == HttpStatusCode.Unauthorized)
+                        {
+                            // More detailed error logging
+                            LogAuthenticationError(matchedSourceUri, accessToken);
+                            
+                            // Option to skip on auth errors if configured
+                            if (_ignore404Errors) // You might want a separate flag for auth errors
+                            {
+                                Log.LogWarning("Skipping image due to authentication error: {Uri}", matchedSourceUri);
+                                return null;
+                            }
+                            
+                            result.EnsureSuccessStatusCode();
                         }
                         else
                         {
-                            // Provide more detailed error information for non-404 failures
-                            Log.LogWarning("EmbededImagesRepairEnricher: Failed to download image {MatchValue} from WorkItem {WorkItemId}, Field {FieldName}. Status: {StatusCode} ({ReasonPhrase})",
-                                matchedSourceUri, targetWorkItem.Id, sourceFieldName, (int)result.StatusCode, result.ReasonPhrase);
-                            
+                            Log.LogError("Download failed: {StatusCode} - {ReasonPhrase} from {Uri}", 
+                                result.StatusCode, result.ReasonPhrase, matchedSourceUri);
                             result.EnsureSuccessStatusCode();
                         }
                     }
                 }
 
-                if (GetImageFormat(File.ReadAllBytes(fullImageFilePath)) == ImageFormat.unknown)
+                // Verify the downloaded file
+                if (!File.Exists(fullImageFilePath) || new FileInfo(fullImageFilePath).Length == 0)
                 {
-                    throw new Exception($"Downloaded image [{fullImageFilePath}] from Work Item [{targetWorkItem.Id}] Field: [{sourceFieldName}] could not be identified as an image. Authentication issue?");
+                    Log.LogError("Downloaded file is empty or doesn't exist: {FilePath}", fullImageFilePath);
+                    return null;
+                }
+
+                var imageBytes = File.ReadAllBytes(fullImageFilePath);
+                if (GetImageFormat(imageBytes) == ImageFormat.unknown)
+                {
+                    // Log first few bytes to debug
+                    var firstBytes = imageBytes.Take(100).ToArray();
+                    var content = Encoding.UTF8.GetString(firstBytes);
+                    Log.LogError("Not an image. First 100 bytes: {Content}", content);
+                    
+                    throw new Exception($"Downloaded content is not a valid image. Might be an auth page.");
                 }
 
                 var attachRef = UploadImageToTarget(targetWorkItem.ToWorkItem(), fullImageFilePath);
                 if (attachRef == null)
                 {
-                    throw new Exception($"Unable to upload the image [{fullImageFilePath}] to Work Item [{targetWorkItem.Id}] Field: [{sourceFieldName}].");
+                    throw new Exception($"Unable to upload the image [{fullImageFilePath}].");
                 }
 
                 return attachRef.Url;
             }
             catch (Exception ex)
             {
-                throw ex;
+                Log.LogError(ex, "Failed to process embedded image from {Uri}", matchedSourceUri);
+                throw;
             }
             finally
             {
                 if (File.Exists(fullImageFilePath))
-                    File.Delete(fullImageFilePath);
+                {
+                    try { File.Delete(fullImageFilePath); } catch { }
+                }
+            }
+        }
+
+        private string DetermineAccessToken(string imageUrl, string providedToken)
+        {
+            // First, try the provided token (if any)
+            if (!string.IsNullOrEmpty(providedToken))
+            {
+                Log.LogDebug("Using provided token for URL: {Url}", imageUrl);
+                return providedToken;
+            }
+            
+            // Parse the URL to determine which organization it belongs to
+            Uri uri = new Uri(imageUrl);
+            string host = uri.Host.ToLower();
+            string pathOrg = "";
+            
+            // Extract organization from URL
+            if (host.Contains("dev.azure.com"))
+            {
+                // Format: https://dev.azure.com/{organization}/
+                var segments = uri.Segments;
+                if (segments.Length > 1)
+                {
+                    pathOrg = segments[1].Trim('/').ToLower();
+                }
+            }
+            else if (host.Contains("visualstudio.com"))
+            {
+                // Format: https://{organization}.visualstudio.com/
+                pathOrg = host.Split('.')[0].ToLower();
+            }
+            
+            Log.LogDebug("Image URL organization: {Org} from {Url}", pathOrg, imageUrl);
+            
+            // Check if it matches source organization
+            string sourceOrg = ExtractOrganization(_processor.Source.Options.Collection.ToString());
+            string targetOrg = ExtractOrganization(_processor.Target.Options.Collection.ToString());
+            
+            Log.LogDebug("Source Org: {SourceOrg}, Target Org: {TargetOrg}, Image Org: {ImageOrg}", 
+                sourceOrg, targetOrg, pathOrg);
+            
+            if (!string.IsNullOrEmpty(pathOrg))
+            {
+                if (pathOrg.Equals(sourceOrg, StringComparison.OrdinalIgnoreCase))
+                {
+                    // Use source authentication
+                    if (_processor.Source.Options.Authentication.AuthenticationMode == AuthenticationMode.AccessToken)
+                    {
+                        Log.LogDebug("Using SOURCE token for organization: {Org}", pathOrg);
+                        return _processor.Source.Options.Authentication.AccessToken;
+                    }
+                    else if (_processor.Source.Options.Authentication.AuthenticationMode == AuthenticationMode.Windows)
+                    {
+                        var creds = _processor.Source.Options.Authentication.NetworkCredentials;
+                        return $"{creds.Domain}\\{creds.UserName}:{creds.Password}";
+                    }
+                }
+                else if (pathOrg.Equals(targetOrg, StringComparison.OrdinalIgnoreCase))
+                {
+                    // Use target authentication
+                    if (_processor.Target.Options.Authentication.AuthenticationMode == AuthenticationMode.AccessToken)
+                    {
+                        Log.LogDebug("Using TARGET token for organization: {Org}", pathOrg);
+                        return _processor.Target.Options.Authentication.AccessToken;
+                    }
+                    else if (_processor.Target.Options.Authentication.AuthenticationMode == AuthenticationMode.Windows)
+                    {
+                        var creds = _processor.Target.Options.Authentication.NetworkCredentials;
+                        return $"{creds.Domain}\\{creds.UserName}:{creds.Password}";
+                    }
+                }
+            }
+            
+            // Fallback: try to guess based on current sync direction
+            // If we're processing a work item from source to target, images are likely from source
+            Log.LogWarning("Could not determine organization for URL: {Url}. Trying source token.", imageUrl);
+            
+            if (_processor.Source.Options.Authentication.AuthenticationMode == AuthenticationMode.AccessToken)
+            {
+                return _processor.Source.Options.Authentication.AccessToken;
+            }
+            
+            return null;
+        }
+
+        private string ExtractOrganization(string collectionUrl)
+        {
+            Uri uri = new Uri(collectionUrl);
+            string host = uri.Host.ToLower();
+            
+            if (host.Contains("dev.azure.com"))
+            {
+                // Format: https://dev.azure.com/{organization}/
+                var segments = uri.Segments;
+                if (segments.Length > 1)
+                {
+                    return segments[1].Trim('/').ToLower();
+                }
+            }
+            else if (host.Contains("visualstudio.com"))
+            {
+                // Format: https://{organization}.visualstudio.com/
+                return host.Split('.')[0].ToLower();
+            }
+            
+            return "";
+        }
+
+        private void LogAuthenticationError(string url, string tokenInfo)
+        {
+            Uri uri = new Uri(url);
+            string org = ExtractOrganization(url);
+            
+            Log.LogError("Authentication failed for URL: {Url}", url);
+            Log.LogError("Organization detected: {Org}", org);
+            Log.LogError("Token was {TokenStatus}", string.IsNullOrEmpty(tokenInfo) ? "NOT PROVIDED" : "PROVIDED");
+            
+            string sourceOrg = ExtractOrganization(_processor.Source.Options.Collection.ToString());
+            string targetOrg = ExtractOrganization(_processor.Target.Options.Collection.ToString());
+            
+            Log.LogError("Source Organization: {SourceOrg}, Target Organization: {TargetOrg}", sourceOrg, targetOrg);
+            
+            if (org.Equals(sourceOrg, StringComparison.OrdinalIgnoreCase))
+            {
+                Log.LogError("This appears to be a SOURCE organization URL. Check your source PAT token.");
+                Log.LogError("Source Auth Mode: {Mode}", _processor.Source.Options.Authentication.AuthenticationMode);
+            }
+            else if (org.Equals(targetOrg, StringComparison.OrdinalIgnoreCase))
+            {
+                Log.LogError("This appears to be a TARGET organization URL. Check your target PAT token.");
+                Log.LogError("Target Auth Mode: {Mode}", _processor.Target.Options.Authentication.AuthenticationMode);
+            }
+            else
+            {
+                Log.LogError("Could not match organization to source or target. This might be a third-party org.");
             }
         }
 
