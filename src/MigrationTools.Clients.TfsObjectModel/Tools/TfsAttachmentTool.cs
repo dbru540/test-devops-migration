@@ -52,7 +52,7 @@ namespace MigrationTools.Tools
         // Update ProcessAttachments to pass all source attachments
         public void ProcessAttachments(TfsProcessor processor, WorkItemData source, WorkItemData target, bool save = true)
         {
-            Log.LogWarning("=== ATTACHMENT SYNC v2.2 - PRESERVE DUPLICATE COUNTS ===");
+            Log.LogWarning("=== ATTACHMENT SYNC v3.0 - DEDUPLICATE (KEEP 1 COPY PER UNIQUE FILE) ===");
             Log.LogInformation("Starting ProcessAttachments for Source WI: {SourceId} -> Target WI: {TargetId}", 
                 source?.Id, target?.Id);   
             
@@ -198,68 +198,28 @@ namespace MigrationTools.Tools
             {
                 // Calculate source checksum once
                 string sourceChecksum = CalculateFileChecksum(filepath);
-                
-                Log.LogDebug("Processing: {Name}, Length: {Length}, Checksum: {Checksum}", 
+
+                Log.LogDebug("Processing: {Name}, Length: {Length}, Checksum: {Checksum}",
                     sourceAttachment.Name, sourceAttachment.Length, sourceChecksum.Substring(0, 8) + "...");
-                
-                // STEP 1: Count how many identical attachments (name + length + checksum) exist in SOURCE
-                int identicalInSource = 0;
-                
-                foreach (Attachment srcAtt in allSourceAttachments)
-                {
-                    // Check name and length first
-                    if (srcAtt.Name == sourceAttachment.Name && srcAtt.Length == sourceAttachment.Length)
-                    {
-                        // For the current attachment being processed
-                        if (srcAtt.Id == sourceAttachment.Id)
-                        {
-                            identicalInSource++;
-                        }
-                        else
-                        {
-                            // Need to check checksum of other source attachments
-                            // Export/download if needed
-                            var srcFilePath = Path.Combine(_exportWiPath, srcAtt.Id.ToString(), GetSafeFilename(srcAtt.Name));
-                            if (!File.Exists(srcFilePath))
-                            {
-                                try
-                                {
-                                    Directory.CreateDirectory(Path.Combine(_exportWiPath, srcAtt.Id.ToString()));
-                                    var fileLocation = _sourceWorkItemServer.DownloadFile(srcAtt.Id);
-                                    File.Copy(fileLocation, srcFilePath, true);
-                                }
-                                catch (Exception ex)
-                                {
-                                    Log.LogWarning("Could not download source attachment {Id}: {Error}", srcAtt.Id, ex.Message);
-                                    continue;
-                                }
-                            }
-                            
-                            string srcChecksum = CalculateFileChecksum(srcFilePath);
-                            if (srcChecksum == sourceChecksum)
-                            {
-                                identicalInSource++;
-                            }
-                        }
-                    }
-                }
-                
-                // STEP 2: Count how many identical attachments (name + length + checksum) exist in TARGET
-                int identicalInTarget = 0;
-                int pendingInTarget = 0; // Track unsaved attachments added in this batch
+
+                // DEDUPLICATION MODE: Check if target already has ANY copy with same checksum
+                // No need to count source duplicates - we only keep 1 copy per unique file
+
+                // Check if target already has this file (by name + length + checksum)
+                bool targetHasCopy = false;
                 var targetAttachments = targetWorkItem.Attachments.Cast<Attachment>().ToList();
 
                 foreach (var tgtAtt in targetAttachments)
                 {
                     // Skip unsaved attachments (ID = 0) - they were just added in this batch
-                    // and can't be downloaded from the server yet
                     if (tgtAtt.Id == 0)
                     {
-                        // Count pending attachments with same name/length as potential matches
+                        // Check pending attachments by name/length (assume same content since we just added it)
                         if (tgtAtt.Name == sourceAttachment.Name && tgtAtt.Length == sourceAttachment.Length)
                         {
-                            pendingInTarget++;
-                            Log.LogDebug("Skipping pending (unsaved) attachment: {Name} (ID=0)", tgtAtt.Name);
+                            targetHasCopy = true;
+                            Log.LogDebug("Found pending (unsaved) copy: {Name} (ID=0)", tgtAtt.Name);
+                            break;
                         }
                         continue;
                     }
@@ -271,19 +231,19 @@ namespace MigrationTools.Tools
                         string targetChecksum = GetTargetAttachmentChecksum(tgtAtt);
                         if (targetChecksum != null && targetChecksum == sourceChecksum)
                         {
-                            identicalInTarget++;
+                            targetHasCopy = true;
+                            Log.LogDebug("Found existing copy in target: {Name} (ID={Id})", tgtAtt.Name, tgtAtt.Id);
+                            break; // Found one, no need to check more
                         }
                     }
                 }
 
-                // Include pending attachments in the count (they match by name/length, assume same content)
-                identicalInTarget += pendingInTarget;
-                
-                Log.LogInformation("File '{Name}' (checksum {Checksum}): Source has {SourceCount} copies, Target has {TargetCount} copies", 
-                    sourceAttachment.Name, sourceChecksum.Substring(0, 8) + "...", identicalInSource, identicalInTarget);
-                
-                // STEP 3: Decision - Add if target has fewer identical copies than source
-                if (identicalInTarget < identicalInSource)
+                Log.LogInformation("File '{Name}' (checksum {Checksum}): Target {HasCopy}",
+                    sourceAttachment.Name, sourceChecksum.Substring(0, 8) + "...",
+                    targetHasCopy ? "already has a copy" : "needs this file");
+
+                // DECISION: Only add if target has NO copy of this file
+                if (!targetHasCopy)
                 {
                     Attachment a = new Attachment(filepath);
                     
@@ -298,8 +258,8 @@ namespace MigrationTools.Tools
                     Log.LogDebug("Adding attachment with comment: '{Comment}'", a.Comment);
                     
                     targetWorkItem.Attachments.Add(a);
-                    Log.LogInformation("✓ Added attachment {FileName} to WorkItem {WorkItemId} with comment: '{Comment}' (copy {Current} of {Total} needed)", 
-                        filename, targetWorkItem.Id, a.Comment, identicalInTarget + 1, identicalInSource);
+                    Log.LogInformation("✓ Added attachment {FileName} to WorkItem {WorkItemId} with comment: '{Comment}'",
+                        filename, targetWorkItem.Id, a.Comment);
                     return true;
                 }
                 else
@@ -370,8 +330,8 @@ namespace MigrationTools.Tools
                     else
                     {
                         // Everything is already in sync
-                        Log.LogInformation("✓ [SYNCED] WorkItem {WorkItemId} has {Count}/{Total} copies of {FileName} with correct comment: '{Comment}'",
-                            targetWorkItem.Id, identicalInTarget, identicalInSource, filename, expectedComment);
+                        Log.LogInformation("✓ [SYNCED] WorkItem {WorkItemId} already has {FileName} with correct comment: '{Comment}'",
+                            targetWorkItem.Id, filename, expectedComment);
                         return false; // No changes needed
                     }
                 }
@@ -905,25 +865,130 @@ namespace MigrationTools.Tools
         }
 
         /// <summary>
-        /// Main entry point - decides whether to do cleanup or normal sync
+        /// Main entry point - cleans up source duplicates first, then syncs to target
         /// </summary>
         public void SmartProcessAttachments(TfsProcessor processor, WorkItemData source, WorkItemData target, bool save = true)
         {
-            // Check if either work item needs cleanup
-            bool sourceNeedsCleanup = NeedsCleanup(source);
-            bool targetNeedsCleanup = NeedsCleanup(target);
-            
-            if (sourceNeedsCleanup || targetNeedsCleanup)
+            Log.LogWarning("=== SMART ATTACHMENT SYNC v3.0 - CLEANUP SOURCE + DEDUPLICATE ===");
+
+            SetupWorkItemServers(processor);
+
+            if (source is null)
             {
-                Log.LogWarning("Cleanup needed - Source: {SourceNeeds}, Target: {TargetNeeds}", 
-                    sourceNeedsCleanup, targetNeedsCleanup);
-                CleanupAndProcessAttachments(processor, source, target, save);
+                throw new ArgumentNullException(nameof(source));
+            }
+
+            if (target is null)
+            {
+                throw new ArgumentNullException(nameof(target));
+            }
+
+            // STEP 1: Check if source has duplicates that need cleanup
+            int sourceDuplicateCount = CountDuplicates(source);
+
+            if (sourceDuplicateCount > 0)
+            {
+                Log.LogWarning("🧹 SOURCE has {DuplicateCount} duplicate attachments - cleaning up first", sourceDuplicateCount);
+                int sourceRemoved = CleanupDuplicateAttachments(source, _sourceWorkItemServer, true);
+
+                if (sourceRemoved > 0)
+                {
+                    Log.LogInformation("Reloading source work item after cleanup...");
+
+                    // Reload source to get fresh attachment list
+                    string sourceId = source.Id;
+                    source.ToWorkItem().Close();
+                    source = processor.Source.WorkItems.GetWorkItem(sourceId);
+
+                    if (!source.ToWorkItem().IsOpen)
+                    {
+                        source.ToWorkItem().Open();
+                    }
+
+                    Log.LogInformation("Source reloaded - now has {Count} attachments",
+                        source.ToWorkItem().Attachments.Count);
+                }
             }
             else
             {
-                Log.LogInformation("No cleanup needed - running normal sync");
-                ProcessAttachments(processor, source, target, save);
+                Log.LogInformation("✓ Source has no duplicates - skipping cleanup");
             }
+
+            // STEP 2: Check if target has duplicates that need cleanup
+            int targetDuplicateCount = CountDuplicates(target);
+
+            if (targetDuplicateCount > 0)
+            {
+                Log.LogWarning("🧹 TARGET has {DuplicateCount} duplicate attachments - cleaning up", targetDuplicateCount);
+                int targetRemoved = CleanupDuplicateAttachments(target, _targetWorkItemServer, false);
+
+                if (targetRemoved > 0)
+                {
+                    Log.LogInformation("Reloading target work item after cleanup...");
+
+                    // Reload target to get fresh attachment list
+                    string targetId = target.Id;
+                    target.ToWorkItem().Close();
+                    target = processor.Target.WorkItems.GetWorkItem(targetId);
+
+                    if (!target.ToWorkItem().IsOpen)
+                    {
+                        target.ToWorkItem().Open();
+                    }
+
+                    Log.LogInformation("Target reloaded - now has {Count} attachments",
+                        target.ToWorkItem().Attachments.Count);
+
+                    // Re-fix embedded images if needed
+                    if (processor.CommonTools != null && processor.CommonTools.EmbededImages != null && processor.CommonTools.EmbededImages.Enabled)
+                    {
+                        Log.LogInformation("Re-fixing embedded images after target cleanup");
+                        processor.CommonTools.EmbededImages.FixEmbededImages(processor, target);
+                    }
+                }
+            }
+            else
+            {
+                Log.LogInformation("✓ Target has no duplicates - skipping cleanup");
+            }
+
+            // STEP 3: Now run the normal sync process with clean attachment lists
+            Log.LogWarning("STEP 3: Running attachment sync (deduplicate mode)");
+            ProcessAttachments(processor, source, target, save);
+
+            Log.LogWarning("=== SMART ATTACHMENT SYNC COMPLETE ===");
+        }
+
+        /// <summary>
+        /// Counts how many duplicate attachments exist in a work item (same name + length + checksum)
+        /// </summary>
+        private int CountDuplicates(WorkItemData workItemData)
+        {
+            var workItem = workItemData.ToWorkItem();
+
+            if (workItem.Attachments.Count <= 1)
+                return 0;
+
+            // Quick check by name + length only (without downloading)
+            var signatures = new Dictionary<string, int>();
+
+            foreach (Attachment att in workItem.Attachments)
+            {
+                string signature = $"{att.Name}|{att.Length}";
+                if (signatures.ContainsKey(signature))
+                {
+                    signatures[signature]++;
+                }
+                else
+                {
+                    signatures[signature] = 1;
+                }
+            }
+
+            // Count duplicates (attachments beyond the first one with same signature)
+            int duplicateCount = signatures.Values.Where(c => c > 1).Sum(c => c - 1);
+
+            return duplicateCount;
         }        
         
         

@@ -58,6 +58,18 @@
     <PackageReference Include="OpenTelemetry.Instrumentation.Runtime" />
   </ItemGroup>
 
+  <!-- Native DLLs required by TFS Object Model - dotnet publish doesn't copy them automatically -->
+  <ItemGroup>
+    <None Include="$(NuGetPackageRoot)microsoft.teamfoundationserver.extendedclient\19.225.1\lib\native\x86\Microsoft.WITDataStore32.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </None>
+    <None Include="$(NuGetPackageRoot)microsoft.teamfoundationserver.extendedclient\19.225.1\lib\native\amd64\Microsoft.WITDataStore64.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </None>
+  </ItemGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\MigrationTools.Clients.AzureDevops.Rest\MigrationTools.Clients.AzureDevops.Rest.csproj" />
     <ProjectReference Include="..\MigrationTools.Clients.FileSystem\MigrationTools.Clients.FileSystem.csproj" />
