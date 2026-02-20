@@ -406,12 +406,13 @@ namespace MigrationTools.Tools
             {
                 // Moving to Other Team Project from Source
                 wiTargetR = processor.Target.WorkItems.FindReflectedWorkItem(wiSourceR, true);
-                if (wiTargetR == null) // Assume source only (other team project)
+                if (wiTargetR == null)
                 {
+                    Log.LogWarning("[LINK] [FALLBACK] Linked work item {sourceId} not found in target. The link may use the source work item ID.", wiSourceR.Id);
                     wiTargetR = wiSourceR;
                     if (wiTargetR.ToWorkItem().Project.Store.TeamProjectCollection.Uri.ToString().Replace("/", "") != wiSourceR.ToWorkItem().Project.Store.TeamProjectCollection.Uri.ToString().Replace("/", ""))
                     {
-                        wiTargetR = null; // Totally bogus break! as not same team collection
+                        wiTargetR = null;
                     }
                 }
             }
