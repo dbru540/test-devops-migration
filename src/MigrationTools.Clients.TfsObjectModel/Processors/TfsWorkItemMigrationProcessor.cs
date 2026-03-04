@@ -600,6 +600,11 @@ namespace MigrationTools.Processors
                         {
                             targetWorkItem.SaveToAzureDevOps();
                         }
+                        else if (targetWorkItem != null)
+                        {
+                            TraceWriteLine(LogEventLevel.Information, "Skipped save for {TargetWorkItemId}, no changes detected",
+                                new Dictionary<string, object>() { { "TargetWorkItemId", targetWorkItem.Id } });
+                        }
                         if (targetWorkItem != null)
                         {
                             targetWorkItem.ToWorkItem().Close();
@@ -874,16 +879,12 @@ namespace MigrationTools.Processors
                 }
 
                 // Until here we impersonate the maker of the revisions. From here we act as ourselves to push the attachments and add the comment
-                targetWorkItem.ToWorkItem().Fields["System.ChangedBy"].Value = "Migration";
-
                 if (targetWorkItem != null)
                 {
                     ProcessWorkItemAttachments(sourceWorkItem, targetWorkItem, false);
                     if (!string.IsNullOrEmpty(targetWorkItem.Id))
                     {
                         ProcessWorkItemLinks(sourceWorkItem, targetWorkItem);
-                        // The TFS client seems to plainly ignore the ChangedBy field when saving a link, so we need to put this back in place
-                        targetWorkItem.ToWorkItem().Fields["System.ChangedBy"].Value = "Migration";
                     }
 
                     if (Options.GenerateMigrationComment)
@@ -894,10 +895,19 @@ namespace MigrationTools.Processors
                             $"This work item was migrated from a different project or organization. You can find the old version at <a href=\"{reflectedUri}\">{reflectedUri}</a>.");
                         targetWorkItem.ToWorkItem().History = history.ToString();
                     }
-                    targetWorkItem.SaveToAzureDevOps();
+
+                    if (targetWorkItem.ToWorkItem().IsDirty)
+                    {
+                        targetWorkItem.ToWorkItem().Fields["System.ChangedBy"].Value = "Migration";
+                        targetWorkItem.SaveToAzureDevOps();
+                        TraceWriteLine(LogEventLevel.Information, "...Saved as {TargetWorkItemId}", new Dictionary<string, object> { { "TargetWorkItemId", targetWorkItem.Id } });
+                    }
+                    else
+                    {
+                        TraceWriteLine(LogEventLevel.Information, "...Skipped save for {TargetWorkItemId}, no changes detected", new Dictionary<string, object> { { "TargetWorkItemId", targetWorkItem.Id } });
+                    }
 
                     CommonTools.Attachment.CleanUpAfterSave();
-                    TraceWriteLine(LogEventLevel.Information, "...Saved as {TargetWorkItemId}", new Dictionary<string, object> { { "TargetWorkItemId", targetWorkItem.Id } });
                 }
             }
             catch (Exception ex)
