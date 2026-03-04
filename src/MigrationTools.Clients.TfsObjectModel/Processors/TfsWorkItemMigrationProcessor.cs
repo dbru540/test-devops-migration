@@ -72,7 +72,6 @@ namespace MigrationTools.Processors
         private static int _totalWorkItem = 0;
         private static string workItemLogTemplate = "[{sourceWorkItemTypeName,20}][Complete:{currentWorkItem,6}/{totalWorkItems}][sid:{sourceWorkItemId,6}|Rev:{sourceRevisionInt,3}][tid:{targetWorkItemId,6} | ";
         private List<string> _ignore;
-        private HashSet<string> _migrationInFlight = new HashSet<string>();
 
         private ILogger contextLog;
         private ILogger workItemLog;
@@ -555,7 +554,6 @@ namespace MigrationTools.Processors
                 Log.LogDebug("######################################################################################");
                 Log.LogDebug("ProcessWorkItem: {sourceWorkItemId}", sourceWorkItem.Id);
                 Log.LogDebug("######################################################################################");
-                _migrationInFlight.Add(sourceWorkItem.Id);
                 try
                 {
                     if (sourceWorkItem.Type != "Test Plan" && sourceWorkItem.Type != "Test Suite")
@@ -569,7 +567,6 @@ namespace MigrationTools.Processors
                             { "ReplayRevisions", CommonTools.RevisionManager.ReplayRevisions }}
                             );
                         List<RevisionItem> revisionsToMigrate = CommonTools.RevisionManager.GetRevisionsToMigrate(sourceWorkItem.Revisions.Values.ToList(), targetWorkItem?.Revisions.Values.ToList());
-                        EnsureLinkedWorkItemsMigrated(sourceWorkItem, progressTimer);
                         if (targetWorkItem == null)
                         {
                             targetWorkItem = ReplayRevisions(revisionsToMigrate, sourceWorkItem, null);
@@ -666,61 +663,6 @@ namespace MigrationTools.Processors
 
                 _current++;
                 _count--;
-            }
-        }
-
-        private void EnsureLinkedWorkItemsMigrated(WorkItemData sourceWorkItem, ProgressTimer progressTimer)
-        {
-            var linkedSourceIds = sourceWorkItem.ToWorkItem().Links
-                .OfType<RelatedLink>()
-                .Select(rl => rl.RelatedWorkItemId.ToString())
-                .Distinct()
-                .ToList();
-
-            if (linkedSourceIds.Count == 0) return;
-
-            Log.LogInformation("[PRE-MIGRATE] Work item {sourceId} has {count} distinct linked work items to check",
-                sourceWorkItem.Id, linkedSourceIds.Count);
-
-            foreach (var linkedId in linkedSourceIds)
-            {
-                if (_migrationInFlight.Contains(linkedId))
-                {
-                    Log.LogInformation("[PRE-MIGRATE] [SKIP-CIRCULAR] Linked work item {linkedId} is already being migrated (circular reference prevention)", linkedId);
-                    continue;
-                }
-
-                WorkItemData linkedSource = null;
-                try
-                {
-                    linkedSource = Source.WorkItems.GetWorkItem(linkedId);
-                }
-                catch (Exception ex)
-                {
-                    Log.LogWarning(ex, "[PRE-MIGRATE] [SKIP] Could not fetch source work item {linkedId}", linkedId);
-                    continue;
-                }
-
-                if (linkedSource == null) continue;
-
-                if (linkedSource.Type == "Test Plan" || linkedSource.Type == "Test Suite") continue;
-
-                var existingTarget = Target.WorkItems.FindReflectedWorkItem(linkedSource, false);
-                if (existingTarget != null)
-                {
-                    Log.LogDebug("[PRE-MIGRATE] [SKIP-EXISTS] Linked work item {linkedId} already exists in target as {targetId}", linkedId, existingTarget.Id);
-                    continue;
-                }
-
-                Log.LogInformation("[PRE-MIGRATE] [MIGRATING] Pre-migrating linked work item {linkedId} before processing links", linkedId);
-                try
-                {
-                    ProcessWorkItemAsync(linkedSource, progressTimer, Options.WorkItemCreateRetryLimit).Wait();
-                }
-                catch (Exception ex)
-                {
-                    Log.LogWarning(ex, "[PRE-MIGRATE] [FAIL] Could not pre-migrate linked work item {linkedId}. Link will use source ID as fallback.", linkedId);
-                }
             }
         }
 
