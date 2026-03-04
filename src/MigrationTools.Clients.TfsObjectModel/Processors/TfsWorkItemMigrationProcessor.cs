@@ -244,6 +244,7 @@ namespace MigrationTools.Processors
                     contextLog.Warning("The following items could not be migrated: {ItemIds}", string.Join(", ", _itemsInError));
                 }
 
+                CommonTools.WorkItemLink.LogFailedLinksReport();
             }
         }
 
@@ -646,8 +647,8 @@ namespace MigrationTools.Processors
                     activity?.SetStatus(ActivityStatusCode.Error);
                     activity?.SetTag("http.response.status_code", "502");
                     Log.LogError(ex, ex.ToString());
-                    Telemetry.TrackException(ex, activity.Tags);
-                    throw ex;
+                    Telemetry.TrackException(ex, activity?.Tags);
+                    throw;
                 }
                 activity?.Stop();
                 progressTimer.AddProcessedItem(activity.Duration, retries > 0);
@@ -749,7 +750,18 @@ namespace MigrationTools.Processors
                         VssConnection connection = new VssConnection(collectionUri, new VssBasicCredential(string.Empty, token));
                         WorkItemTrackingHttpClient workItemTrackingClient = connection.GetClient<WorkItemTrackingHttpClient>();
                         JsonPatchDocument patchDocument = new JsonPatchDocument();
-                        DateTime changedDate = ((DateTime)currentRevisionWorkItem.Fields["System.ChangedDate"].Value).AddMilliseconds(-3);
+                        // Use a date slightly before the revision date for the type-change intermediate revision.
+                        // This ensures the subsequent SOAP save (with the actual revision date) is strictly after.
+                        DateTime typeChangeDate = ((DateTime)currentRevisionWorkItem.Fields["System.ChangedDate"].Value).AddMilliseconds(-3);
+
+                        // Ensure the type-change date is strictly after the target's last revision date
+                        var targetLastRevDate = (DateTime)targetWorkItem.ToWorkItem().Fields["System.ChangedDate"].Value;
+                        if (typeChangeDate <= targetLastRevDate)
+                        {
+                            typeChangeDate = targetLastRevDate.AddMilliseconds(1);
+                            // Also bump the revision date to ensure SOAP save is strictly after the type-change
+                            revision.ChangedDate = typeChangeDate.AddMilliseconds(1);
+                        }
 
                         patchDocument.Add(
                             new JsonPatchOperation()
@@ -780,7 +792,7 @@ namespace MigrationTools.Processors
                             {
                                 Operation = Operation.Add,
                                 Path = "/fields/System.ChangedDate",
-                                Value = changedDate
+                                Value = typeChangeDate
                             }
                         );
                         patchDocument.Add(
@@ -812,6 +824,12 @@ namespace MigrationTools.Processors
                         }
                     }
                     // Impersonate revision author. Mapping will apply later and may change this.
+                    // Ensure revision date is strictly after target's current ChangedDate (VS402625 fix)
+                    var targetCurrentDate = (DateTime)targetWorkItem.ToWorkItem().Fields["System.ChangedDate"].Value;
+                    if (revision.ChangedDate <= targetCurrentDate)
+                    {
+                        revision.ChangedDate = targetCurrentDate.AddMilliseconds(1);
+                    }
                     targetWorkItem.ToWorkItem().Fields["System.ChangedDate"].Value = revision.ChangedDate;
                     targetWorkItem.ToWorkItem().Fields["System.ChangedBy"].Value = revision.Fields["System.ChangedBy"].Value.ToString();
                     targetWorkItem.ToWorkItem().Fields["System.History"].Value = revision.Fields["System.History"].Value;

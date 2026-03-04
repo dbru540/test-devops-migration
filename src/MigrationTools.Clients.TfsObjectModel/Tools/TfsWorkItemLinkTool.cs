@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Linq;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -19,6 +20,16 @@ namespace MigrationTools.Tools
     /// </summary>
     public class TfsWorkItemLinkTool : Tool<TfsWorkItemLinkToolOptions>
     {
+        private readonly List<FailedLinkInfo> _failedLinks = new List<FailedLinkInfo>();
+
+        private class FailedLinkInfo
+        {
+            public string SourceId { get; set; }
+            public string TargetId { get; set; }
+            public string LinkType { get; set; }
+            public string Reason { get; set; }
+        }
+
         /// <summary>
         /// Initializes a new instance of the TfsWorkItemLinkTool class.
         /// </summary>
@@ -30,6 +41,29 @@ namespace MigrationTools.Tools
             : base(options, services, logger, telemetryLogger)
         {
 
+        }
+
+        /// <summary>
+        /// Gets the count of links that failed during migration.
+        /// </summary>
+        public int FailedLinkCount => _failedLinks.Count;
+
+        /// <summary>
+        /// Logs a summary report of all failed links. Call this at the end of migration.
+        /// </summary>
+        public void LogFailedLinksReport()
+        {
+            if (_failedLinks.Count == 0)
+            {
+                Log.LogInformation("[LINK-REPORT] All links migrated successfully.");
+                return;
+            }
+            Log.LogWarning("[LINK-REPORT] {Count} link(s) failed during migration:", _failedLinks.Count);
+            foreach (var fl in _failedLinks)
+            {
+                Log.LogWarning("[LINK-REPORT]   Source={SourceId} -> Target={TargetId}, Type={LinkType}, Reason={Reason}",
+                    fl.SourceId, fl.TargetId, fl.LinkType, fl.Reason);
+            }
         }
 
         /// <summary>
@@ -372,6 +406,7 @@ namespace MigrationTools.Tools
                         Log.LogWarning(
                                   "  [SKIP] Unable to migrate link where Link of type {0} where wiSourceL={1}, wiSourceR={2}, wiTargetL={3}, wiTargetR={4} as target WI has not been migrated",
                                   rl.LinkTypeEnd.ImmutableName, wiSourceL.Id, wiSourceR.Id, wiTargetL.Id, wiTargetR.Id);
+                        _failedLinks.Add(new FailedLinkInfo { SourceId = wiSourceL.Id, TargetId = wiSourceR.Id, LinkType = rl.LinkTypeEnd.ImmutableName, Reason = "Target work item not yet migrated" });
                     }
                 }
                 else
@@ -389,6 +424,7 @@ namespace MigrationTools.Tools
             else
             {
                 Log.LogWarning("[SKIP] [LINK_CAPTURE_RELATED] [{RegisteredLinkType}] target not found. wiSourceL={wiSourceL}, wiSourceR={wiSourceR}, wiTargetL={wiTargetL}", rl.ArtifactLinkType.GetType().Name, wiSourceL == null ? "null" : wiSourceL.Id, wiSourceR == null ? "null" : wiSourceR.Id, wiTargetL == null ? "null" : wiTargetL.Id);
+                _failedLinks.Add(new FailedLinkInfo { SourceId = wiSourceL?.Id ?? "null", TargetId = wiSourceR?.Id ?? "null", LinkType = rl.ArtifactLinkType.GetType().Name, Reason = "Target work item not found" });
             }
         }
 

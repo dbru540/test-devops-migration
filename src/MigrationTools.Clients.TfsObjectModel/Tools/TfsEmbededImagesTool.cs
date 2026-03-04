@@ -60,7 +60,7 @@ namespace MigrationTools.Tools
             var workItem = targetWorkItem.ToWorkItem();
             if (workItem.IsDirty)
             {
-                Log.LogError("⚠️ EMBEDDED IMAGES MODIFIED - Work item {Id} has pending changes that will be saved during attachment processing", 
+                Log.LogInformation("EMBEDDED IMAGES MODIFIED - Work item {Id} has pending changes that will be saved during attachment processing",
                     targetWorkItem.Id);
                 return 1;
             }
@@ -133,12 +133,6 @@ namespace MigrationTools.Tools
                         Log.LogWarning("Field {FieldName} ({RefName}) contains dev.azure.com URLs", 
                             field.Name, field.ReferenceName);
                         
-                        // Check specifically for fiveforty URLs
-                        if (originalValue.Contains("dev.azure.com/fiveforty"))
-                        {
-                            Log.LogError("❌ FOUND FIVEFORTY URL in field {FieldName}!", field.Name);
-                        }
-                        
                         // Log a sample of the content
                         var sample = originalValue.Length > 500 ? originalValue.Substring(0, 500) : originalValue;
                         Log.LogDebug("Field content sample: {Sample}", sample);
@@ -170,7 +164,7 @@ namespace MigrationTools.Tools
                         if (imageUrl.Contains("/_apis/wit/attachments/") && 
                             !imageOrg.Equals(targetOrg, StringComparison.OrdinalIgnoreCase))
                         {
-                            Log.LogError("❌ WRONG ORG ATTACHMENT: {Url} is from {WrongOrg} but should be {CorrectOrg}", 
+                            Log.LogWarning("WRONG ORG ATTACHMENT: {Url} is from {WrongOrg} but should be {CorrectOrg}",
                                 imageUrl, imageOrg, targetOrg);
                             
                             // Force replacement
@@ -191,7 +185,7 @@ namespace MigrationTools.Tools
                                     if (!string.IsNullOrWhiteSpace(newImageLink))
                                     {
                                         _cachedUploadedUrisBySourceValue[cacheKey] = newImageLink;
-                                        Log.LogError("✅ UPLOADED: New URL is {NewUrl}", newImageLink);
+                                        Log.LogInformation("Uploaded embedded image: New URL is {NewUrl}", newImageLink);
                                     }
                                 }
                                 catch (Exception ex)
@@ -208,7 +202,7 @@ namespace MigrationTools.Tools
                                 modifiedValue = modifiedValue.Replace(match.Value, newImageLink);
                                 modifiedValue = modifiedValue.Replace(System.Net.WebUtility.HtmlEncode(match.Value), newImageLink);
                                 anyChanges = true;
-                                Log.LogError("✅ REPLACED in content: {Old} -> {New}", imageUrl, newImageLink);
+                                Log.LogInformation("Replaced embedded image URL in content: {Old} -> {New}", imageUrl, newImageLink);
                             }
                         }
                         else if (!imageOrg.Equals(targetOrg, StringComparison.OrdinalIgnoreCase))
@@ -222,7 +216,7 @@ namespace MigrationTools.Tools
                     if (modifiedValue != originalValue)
                     {
                         field.Value = modifiedValue;
-                        Log.LogError("✅ FIELD {FieldName} ({RefName}) UPDATED with new URLs", 
+                        Log.LogInformation("Field {FieldName} ({RefName}) updated with new URLs",
                             field.Name, field.ReferenceName);
                     }
                 }
@@ -243,9 +237,9 @@ namespace MigrationTools.Tools
                 if (latestRevision.Fields.Contains("System.History"))
                 {
                     string historyValue = (string)latestRevision.Fields["System.History"].Value;
-                    if (!string.IsNullOrEmpty(historyValue) && historyValue.Contains("dev.azure.com/fiveforty"))
+                    if (!string.IsNullOrEmpty(historyValue) && historyValue.Contains("dev.azure.com"))
                     {
-                        Log.LogError("❌ FOUND FIVEFORTY URL in revision history/comments!");
+                        Log.LogWarning("Found Azure DevOps URL in revision history/comments that may need attention");
                         // Note: History field is read-only in revisions, we need to add a new comment to fix it
                     }
                 }
@@ -253,11 +247,11 @@ namespace MigrationTools.Tools
             
             if (anyChanges)
             {
-                Log.LogError("⚠️ CHANGES MADE - Work item {Id} needs to be saved!", wi.Id);
+                Log.LogInformation("Embedded images changes made - Work item {Id} needs to be saved", wi.Id);
             }
             else
             {
-                Log.LogWarning("ℹ️ NO CHANGES - All images already correct or no images found");
+                Log.LogDebug("No embedded image changes needed - All images already correct or no images found");
             }
         }
 

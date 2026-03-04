@@ -345,17 +345,17 @@ namespace MigrationTools.Tools
         }
 
         /// <summary>
-        /// Calculates MD5 checksum for a file
+        /// Calculates SHA256 checksum for a file
         /// </summary>
         private string CalculateFileChecksum(string filepath)
         {
             try
             {
-                using (var md5 = System.Security.Cryptography.MD5.Create())
+                using (var sha256 = System.Security.Cryptography.SHA256.Create())
                 {
                     using (var stream = File.OpenRead(filepath))
                     {
-                        var hash = md5.ComputeHash(stream);
+                        var hash = sha256.ComputeHash(stream);
                         return BitConverter.ToString(hash).Replace("-", "").ToLowerInvariant();
                     }
                 }
@@ -368,7 +368,7 @@ namespace MigrationTools.Tools
         }
 
         /// <summary>
-        /// Gets checksum of target attachment by downloading and calculating MD5
+        /// Gets checksum of target attachment by downloading and calculating SHA256
         /// </summary>
         private string GetTargetAttachmentChecksum(Attachment targetAttachment)
         {
@@ -429,7 +429,12 @@ namespace MigrationTools.Tools
         /// </summary>
         public string GetSafeFilename(string filename)
         {
-            return string.Join("_", filename.Split(Path.GetInvalidFileNameChars()));
+            if (string.IsNullOrWhiteSpace(filename))
+                return "_unnamed_";
+            var safe = string.Join("_", filename.Split(Path.GetInvalidFileNameChars()));
+            safe = safe.Replace("..", "_");
+            safe = Path.GetFileName(safe);
+            return string.IsNullOrWhiteSpace(safe) ? "_unnamed_" : safe;
         }
 
         /// <summary>
