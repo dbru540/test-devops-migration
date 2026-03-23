@@ -5,6 +5,7 @@ using System.Globalization;
 using System.Linq;
 using System.Net;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -37,6 +38,15 @@ namespace MigrationTools.Processors
     /// <processingtarget>Work Items</processingtarget>
     public class TfsWorkItemMigrationProcessor : TfsProcessor
     {
+        private const string SyncedCommentMarker = "<!-- SYNCED -->";
+        private const string BackfilledCommentMarker = "<!-- BACKFILLED -->";
+        private static readonly Regex LegacySyncedCommentPrefixRegex = new Regex(
+            @"^\s*<b>\[Synced - Comment by .*?\]</b><br\/?>",
+            RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        private static readonly Regex BackfilledCommentPrefixRegex = new Regex(
+            @"^\s*<b>\[BACKFILLED COMMENT - Source rev .*?\]</b><br\/?>",
+            RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
         private class ProgressTimer
         {
             private TimeSpan _totalProcessedTime = TimeSpan.Zero;
@@ -108,6 +118,96 @@ namespace MigrationTools.Processors
                 }
             }
             workItemLog.Write(level, workItemLogTemplate + message);
+        }
+
+        private static DateTime NormalizeToUtc(DateTime value)
+        {
+            return value.Kind switch
+            {
+                DateTimeKind.Utc => value,
+                DateTimeKind.Local => value.ToUniversalTime(),
+                _ => DateTime.SpecifyKind(value, DateTimeKind.Utc)
+            };
+        }
+
+        private static string NormalizeHistoryValue(string historyValue)
+        {
+            if (string.IsNullOrWhiteSpace(historyValue))
+            {
+                return string.Empty;
+            }
+
+            string normalized = historyValue
+                .Replace(SyncedCommentMarker, string.Empty)
+                .Replace(BackfilledCommentMarker, string.Empty)
+                .Trim();
+            normalized = LegacySyncedCommentPrefixRegex.Replace(normalized, string.Empty).Trim();
+            normalized = BackfilledCommentPrefixRegex.Replace(normalized, string.Empty).Trim();
+            return normalized;
+        }
+
+        private static bool TargetAlreadyContainsHistoryValue(WorkItemData targetWorkItem, string sourceHistoryValue)
+        {
+            string normalizedSourceHistory = NormalizeHistoryValue(sourceHistoryValue);
+            if (string.IsNullOrWhiteSpace(normalizedSourceHistory) || targetWorkItem == null)
+            {
+                return false;
+            }
+
+            var workItem = targetWorkItem.ToWorkItem();
+            if (workItem == null)
+            {
+                return false;
+            }
+
+            foreach (Revision targetRevision in workItem.Revisions)
+            {
+                if (!targetRevision.Fields.Contains("System.History"))
+                {
+                    continue;
+                }
+
+                string targetHistory = NormalizeHistoryValue(targetRevision.Fields["System.History"].Value?.ToString());
+                if (!string.IsNullOrWhiteSpace(targetHistory) && string.Equals(targetHistory, normalizedSourceHistory, StringComparison.Ordinal))
+                {
+                    return true;
+                }
+            }
+
+            if (workItem.Fields.Contains("System.History"))
+            {
+                string currentHistory = NormalizeHistoryValue(workItem.Fields["System.History"].Value?.ToString());
+                if (!string.IsNullOrWhiteSpace(currentHistory) && string.Equals(currentHistory, normalizedSourceHistory, StringComparison.Ordinal))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static string BuildBackfilledHistoryValue(RevisionItem revision, string rawHistoryValue)
+        {
+            string changedBy = revision.Fields["System.ChangedBy"].Value?.ToString() ?? "Unknown";
+            DateTime originalChangedDateUtc = NormalizeToUtc(revision.OriginalChangedDate == default ? revision.ChangedDate : revision.OriginalChangedDate);
+            return $"{BackfilledCommentMarker}<b>[BACKFILLED COMMENT - Source rev {revision.Number} - Original date {originalChangedDateUtc:yyyy-MM-dd HH:mm:ss} UTC - Author {changedBy}]</b><br/>{rawHistoryValue}";
+        }
+
+        private static DateTime ClampReplayDate(DateTime candidate, DateTime floorExclusiveUtc)
+        {
+            DateTime nowUtc = DateTime.UtcNow.AddSeconds(-1);
+            if (candidate > nowUtc)
+            {
+                candidate = nowUtc;
+            }
+
+            if (candidate <= floorExclusiveUtc)
+            {
+                DateTime bumped = floorExclusiveUtc.AddSeconds(1);
+                candidate = bumped <= nowUtc ? bumped : nowUtc;
+            }
+
+            return candidate;
         }
 
         protected override void InternalExecute()
@@ -730,18 +830,47 @@ namespace MigrationTools.Processors
                 // Track the last saved date on the target to ensure dates are strictly increasing (VS402625 fix).
                 // PopulateWorkItem overwrites System.ChangedDate with the source date, so we must track separately.
                 DateTime lastTargetSavedDate = targetWorkItem != null
-                    ? (DateTime)targetWorkItem.ToWorkItem().Fields["System.ChangedDate"].Value
+                    ? NormalizeToUtc((DateTime)targetWorkItem.ToWorkItem().Fields["System.ChangedDate"].Value)
                     : DateTime.MinValue;
+                DateTime initialTargetLatestDate = lastTargetSavedDate;
 
                 foreach (var revision in revisionsToMigrate)
                 {
                     workItemMetrics.RevisionsProcessedCount.Add(1);
                     var currentRevisionWorkItem = sourceWorkItem.GetRevision(revision.Number);
+                    string rawHistoryValue = revision.Fields.ContainsKey("System.History")
+                        ? revision.Fields["System.History"].Value?.ToString()
+                        : null;
+                    DateTime originalRevisionDateUtc = NormalizeToUtc(revision.OriginalChangedDate == default ? revision.ChangedDate : revision.OriginalChangedDate);
 
                     TraceWriteLine(LogEventLevel.Information, " Processing Revision [{RevisionNumber}]",
                         new Dictionary<string, object>() {
                             {"RevisionNumber", revision.Number }
                         });
+
+                    bool shouldBackfillCommentOnly =
+                        targetWorkItem != null &&
+                        !string.IsNullOrWhiteSpace(rawHistoryValue) &&
+                        originalRevisionDateUtc <= initialTargetLatestDate &&
+                        !TargetAlreadyContainsHistoryValue(targetWorkItem, rawHistoryValue);
+
+                    if (shouldBackfillCommentOnly)
+                    {
+                        targetWorkItem.ToWorkItem().Fields["System.History"].Value = BuildBackfilledHistoryValue(revision, rawHistoryValue);
+                        ProcessHTMLFieldAttachements(targetWorkItem);
+                        ProcessWorkItemEmbeddedLinks(sourceWorkItem, targetWorkItem);
+                        targetWorkItem.SaveToAzureDevOps();
+                        lastTargetSavedDate = NormalizeToUtc((DateTime)targetWorkItem.ToWorkItem().Fields["System.ChangedDate"].Value);
+
+                        TraceWriteLine(LogEventLevel.Information,
+                            " Backfilled missing comment from revision {RevisionNumber} onto TargetWorkItem {TargetWorkItemId}",
+                            new Dictionary<string, object>()
+                            {
+                                { "RevisionNumber", revision.Number },
+                                { "TargetWorkItemId", targetWorkItem.Id }
+                            });
+                        continue;
+                    }
 
                     // Decide on WIT
                     var destType = currentRevisionWorkItem.Type;
@@ -763,7 +892,7 @@ namespace MigrationTools.Processors
                         JsonPatchDocument patchDocument = new JsonPatchDocument();
                         // Use a date slightly before the revision date for the type-change intermediate revision.
                         // This ensures the subsequent SOAP save (with the actual revision date) is strictly after.
-                        DateTime typeChangeDate = ((DateTime)currentRevisionWorkItem.Fields["System.ChangedDate"].Value).AddMilliseconds(-3);
+                        DateTime typeChangeDate = NormalizeToUtc((DateTime)currentRevisionWorkItem.Fields["System.ChangedDate"].Value).AddMilliseconds(-3);
 
                         // Ensure the type-change date is strictly after the target's last saved date
                         if (typeChangeDate <= lastTargetSavedDate)
@@ -773,6 +902,8 @@ namespace MigrationTools.Processors
                             // Also bump the revision date to ensure SOAP save is strictly after the type-change.
                             revision.ChangedDate = typeChangeDate.AddSeconds(1);
                         }
+                        typeChangeDate = ClampReplayDate(typeChangeDate, lastTargetSavedDate);
+                        revision.ChangedDate = ClampReplayDate(NormalizeToUtc(revision.ChangedDate), typeChangeDate);
 
                         patchDocument.Add(
                             new JsonPatchOperation()
@@ -816,7 +947,7 @@ namespace MigrationTools.Processors
                         );
                         var result = workItemTrackingClient.UpdateWorkItemAsync(patchDocument, workItemId, bypassRules: true).Result;
                         targetWorkItem = Target.WorkItems.GetWorkItem(workItemId);
-                        lastTargetSavedDate = (DateTime)targetWorkItem.ToWorkItem().Fields["System.ChangedDate"].Value;
+                        lastTargetSavedDate = NormalizeToUtc((DateTime)targetWorkItem.ToWorkItem().Fields["System.ChangedDate"].Value);
                     }
                     PopulateWorkItem(currentRevisionWorkItem, targetWorkItem, destType);
 
@@ -839,17 +970,18 @@ namespace MigrationTools.Processors
                     // Ensure revision date is strictly after target's last saved date (VS402625 fix).
                     // We use lastTargetSavedDate instead of reading from the work item, because
                     // PopulateWorkItem already overwrote System.ChangedDate with the source date.
+                    revision.ChangedDate = NormalizeToUtc(revision.ChangedDate);
                     if (revision.ChangedDate <= lastTargetSavedDate)
                     {
                         revision.ChangedDate = lastTargetSavedDate.AddSeconds(1);
                     }
+                    revision.ChangedDate = ClampReplayDate(revision.ChangedDate, lastTargetSavedDate);
                     targetWorkItem.ToWorkItem().Fields["System.ChangedDate"].Value = revision.ChangedDate;
                     targetWorkItem.ToWorkItem().Fields["System.ChangedBy"].Value = revision.Fields["System.ChangedBy"].Value.ToString();
-                    var historyValue = revision.Fields["System.History"].Value?.ToString();
+                    var historyValue = rawHistoryValue;
                     if (!string.IsNullOrEmpty(historyValue))
                     {
-                        var changedBy = revision.Fields["System.ChangedBy"].Value?.ToString() ?? "Unknown";
-                        historyValue = $"<b>[Synced - Comment by {changedBy}]</b><br/>{historyValue}";
+                        historyValue = $"{SyncedCommentMarker}{historyValue}";
                     }
                     targetWorkItem.ToWorkItem().Fields["System.History"].Value = historyValue;
 
@@ -882,7 +1014,7 @@ namespace MigrationTools.Processors
                     {
 
                         targetWorkItem.SaveToAzureDevOps();
-                        lastTargetSavedDate = (DateTime)targetWorkItem.ToWorkItem().Fields["System.ChangedDate"].Value;
+                        lastTargetSavedDate = NormalizeToUtc((DateTime)targetWorkItem.ToWorkItem().Fields["System.ChangedDate"].Value);
                     }
                     TraceWriteLine(LogEventLevel.Information,
                         " Saved TargetWorkItem {TargetWorkItemId}. Replayed revision {RevisionNumber} of {RevisionsToMigrateCount}",

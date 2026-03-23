@@ -24,7 +24,7 @@ namespace MigrationTools.Tools
     {
         private const string RegexPatternForImageUrl = "(?<=<img.*?src=\")[^\"]*";
         private const string RegexPatternForImageFileName = "(?<=FileName=)[^=]*";
-        private const string TargetDummyWorkItemTitle = "***** DELETE THIS - Migration Tool Generated Dummy Work Item For TfsEmbededImagesTool *****";
+        private const string TargetDummyWorkItemTitlePrefix = "***** DELETE THIS - Dummy WI - Run:";
 
         private Project _targetProject;
 
@@ -579,7 +579,7 @@ namespace MigrationTools.Tools
                 }
             });
 
-            var dummyWi = GetDummyWorkItem(wi.Type);
+            var dummyWi = GetDummyWorkItem(wi, wi.Type);
             var wii = httpClient.UpdateWorkItemAsync(payload, dummyWi.Id, bypassRules: true).GetAwaiter().GetResult();
             if (wii != null)
             {
@@ -600,7 +600,7 @@ namespace MigrationTools.Tools
         private int _DummyWorkItemCount = 0;
         private TfsProcessor _processor;
 
-        private WorkItem GetDummyWorkItem(WorkItemType type = null)
+        private WorkItem GetDummyWorkItem(WorkItem sourceWorkItem, WorkItemType type = null)
         {
             if (_DummyWorkItemCount > 900)
             {
@@ -622,7 +622,12 @@ namespace MigrationTools.Tools
                 }
 
                 _targetDummyWorkItem = type.NewWorkItem();
-                _targetDummyWorkItem.Title = TargetDummyWorkItemTitle;
+                var runId = Environment.GetEnvironmentVariable("BUILD_BUILDID");
+                if (string.IsNullOrWhiteSpace(runId))
+                {
+                    runId = "local";
+                }
+                _targetDummyWorkItem.Title = $"{TargetDummyWorkItemTitlePrefix}{runId} - SourceWI:{sourceWorkItem.Id} *****";
 
                 var fails = _targetDummyWorkItem.Validate();
                 if (fails.Count > 0)
