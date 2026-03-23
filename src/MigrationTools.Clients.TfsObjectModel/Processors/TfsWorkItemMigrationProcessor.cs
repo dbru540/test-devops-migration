@@ -146,6 +146,19 @@ namespace MigrationTools.Processors
             return normalized;
         }
 
+        private static bool IsMigrationGeneratedHistoryValue(string historyValue)
+        {
+            if (string.IsNullOrWhiteSpace(historyValue))
+            {
+                return false;
+            }
+
+            return historyValue.IndexOf(SyncedCommentMarker, StringComparison.Ordinal) >= 0
+                || historyValue.IndexOf(BackfilledCommentMarker, StringComparison.Ordinal) >= 0
+                || LegacySyncedCommentPrefixRegex.IsMatch(historyValue)
+                || BackfilledCommentPrefixRegex.IsMatch(historyValue);
+        }
+
         private static bool TargetAlreadyContainsHistoryValue(WorkItemData targetWorkItem, string sourceHistoryValue)
         {
             string normalizedSourceHistory = NormalizeHistoryValue(sourceHistoryValue);
@@ -190,7 +203,8 @@ namespace MigrationTools.Processors
         {
             string changedBy = revision.Fields["System.ChangedBy"].Value?.ToString() ?? "Unknown";
             DateTime originalChangedDateUtc = NormalizeToUtc(revision.OriginalChangedDate == default ? revision.ChangedDate : revision.OriginalChangedDate);
-            return $"{BackfilledCommentMarker}<b>[BACKFILLED COMMENT - Source rev {revision.Number} - Original date {originalChangedDateUtc:yyyy-MM-dd HH:mm:ss} UTC - Author {changedBy}]</b><br/>{rawHistoryValue}";
+            string normalizedHistoryValue = NormalizeHistoryValue(rawHistoryValue);
+            return $"{BackfilledCommentMarker}<b>[BACKFILLED COMMENT - Source rev {revision.Number} - Original date {originalChangedDateUtc:yyyy-MM-dd HH:mm:ss} UTC - Author {changedBy}]</b><br/>{normalizedHistoryValue}";
         }
 
         private static DateTime ClampReplayDate(DateTime candidate, DateTime floorExclusiveUtc)
@@ -908,6 +922,7 @@ namespace MigrationTools.Processors
                     string rawHistoryValue = revision.Fields.ContainsKey("System.History")
                         ? revision.Fields["System.History"].Value?.ToString()
                         : null;
+                    bool isMigrationGeneratedHistory = IsMigrationGeneratedHistoryValue(rawHistoryValue);
                     DateTime originalRevisionDateUtc = NormalizeToUtc(revision.OriginalChangedDate == default ? revision.ChangedDate : revision.OriginalChangedDate);
 
                     TraceWriteLine(LogEventLevel.Information, " Processing Revision [{RevisionNumber}]",
@@ -918,6 +933,7 @@ namespace MigrationTools.Processors
                     bool shouldBackfillCommentOnly =
                         targetWorkItem != null &&
                         !string.IsNullOrWhiteSpace(rawHistoryValue) &&
+                        !isMigrationGeneratedHistory &&
                         originalRevisionDateUtc <= initialTargetLatestDate &&
                         !TargetAlreadyContainsHistoryValue(targetWorkItem, rawHistoryValue);
 
@@ -1045,7 +1061,7 @@ namespace MigrationTools.Processors
                     revision.ChangedDate = ClampReplayDate(revision.ChangedDate, lastTargetSavedDate);
                     targetWorkItem.ToWorkItem().Fields["System.ChangedDate"].Value = revision.ChangedDate;
                     targetWorkItem.ToWorkItem().Fields["System.ChangedBy"].Value = revision.Fields["System.ChangedBy"].Value.ToString();
-                    var historyValue = rawHistoryValue;
+                    var historyValue = isMigrationGeneratedHistory ? null : rawHistoryValue;
                     if (!string.IsNullOrEmpty(historyValue))
                     {
                         historyValue = $"{SyncedCommentMarker}{historyValue}";
