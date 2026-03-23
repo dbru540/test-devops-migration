@@ -918,7 +918,6 @@ namespace MigrationTools.Processors
                 foreach (var revision in revisionsToMigrate)
                 {
                     workItemMetrics.RevisionsProcessedCount.Add(1);
-                    var currentRevisionWorkItem = sourceWorkItem.GetRevision(revision.Number);
                     string rawHistoryValue = revision.Fields.ContainsKey("System.History")
                         ? revision.Fields["System.History"].Value?.ToString()
                         : null;
@@ -930,10 +929,18 @@ namespace MigrationTools.Processors
                             {"RevisionNumber", revision.Number }
                         });
 
+                    if (isMigrationGeneratedHistory)
+                    {
+                        TraceWriteLine(LogEventLevel.Information, " Skipping migration-generated history revision [{RevisionNumber}]",
+                            new Dictionary<string, object>() {
+                                { "RevisionNumber", revision.Number }
+                            });
+                        continue;
+                    }
+
                     bool shouldBackfillCommentOnly =
                         targetWorkItem != null &&
                         !string.IsNullOrWhiteSpace(rawHistoryValue) &&
-                        !isMigrationGeneratedHistory &&
                         originalRevisionDateUtc <= initialTargetLatestDate &&
                         !TargetAlreadyContainsHistoryValue(targetWorkItem, rawHistoryValue);
 
@@ -954,6 +961,8 @@ namespace MigrationTools.Processors
                             });
                         continue;
                     }
+
+                    var currentRevisionWorkItem = sourceWorkItem.GetRevision(revision.Number);
 
                     // Decide on WIT
                     var destType = currentRevisionWorkItem.Type;

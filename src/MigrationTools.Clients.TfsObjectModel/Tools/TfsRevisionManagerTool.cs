@@ -68,6 +68,12 @@ namespace MigrationTools.Tools
         public List<RevisionItem> GetRevisionsToMigrate(List<RevisionItem> sourceRevisions, List<RevisionItem> targetRevisions)
         {
             EnforceDatesMustBeIncreasing(sourceRevisions);
+            sourceRevisions = sourceRevisions
+                .Where(x => !IsMigrationGeneratedHistoryValue(
+                    x.Fields != null && x.Fields.ContainsKey("System.History")
+                        ? x.Fields["System.History"].Value?.ToString()
+                        : null))
+                .ToList();
 
             LogDebugCurrentSortedRevisions(sourceRevisions, "Source");
             LogDebugCurrentSortedRevisions(targetRevisions, "Target");
@@ -199,6 +205,19 @@ namespace MigrationTools.Tools
             normalized = LegacySyncedCommentPrefixRegex.Replace(normalized, string.Empty).Trim();
             normalized = BackfilledCommentPrefixRegex.Replace(normalized, string.Empty).Trim();
             return normalized;
+        }
+
+        private static bool IsMigrationGeneratedHistoryValue(string historyValue)
+        {
+            if (string.IsNullOrWhiteSpace(historyValue))
+            {
+                return false;
+            }
+
+            return historyValue.IndexOf(SyncedCommentMarker, StringComparison.Ordinal) >= 0
+                || historyValue.IndexOf(BackfilledCommentMarker, StringComparison.Ordinal) >= 0
+                || LegacySyncedCommentPrefixRegex.IsMatch(historyValue)
+                || BackfilledCommentPrefixRegex.IsMatch(historyValue);
         }
 
         public void AttachSourceRevisionHistoryJsonToTarget(WorkItemData sourceWorkItem, WorkItemData targetWorkItem)
