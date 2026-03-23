@@ -648,8 +648,7 @@ namespace MigrationTools.Tools
                 }
                 else
                 {
-                    Log.LogDebug("TfsEmbededImagesTool: Dummy workitem {id} created on the target collection.", _targetDummyWorkItem.Id);
-                    //_targetProject.Store.DestroyWorkItems(new List<int> { _targetDummyWorkItem.Id });
+                    Log.LogInformation("[DUMMY-WI-CREATED:{id}] Dummy workitem created on the target collection.", _targetDummyWorkItem.Id);
                 }
             }
             _DummyWorkItemCount++;

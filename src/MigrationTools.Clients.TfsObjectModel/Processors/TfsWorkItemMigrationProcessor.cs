@@ -727,6 +727,12 @@ namespace MigrationTools.Processors
                     CommonTools.RevisionManager.AttachSourceRevisionHistoryJsonToTarget(sourceWorkItem, targetWorkItem);
                 }
 
+                // Track the last saved date on the target to ensure dates are strictly increasing (VS402625 fix).
+                // PopulateWorkItem overwrites System.ChangedDate with the source date, so we must track separately.
+                DateTime lastTargetSavedDate = targetWorkItem != null
+                    ? (DateTime)targetWorkItem.ToWorkItem().Fields["System.ChangedDate"].Value
+                    : DateTime.MinValue;
+
                 foreach (var revision in revisionsToMigrate)
                 {
                     workItemMetrics.RevisionsProcessedCount.Add(1);
@@ -759,11 +765,10 @@ namespace MigrationTools.Processors
                         // This ensures the subsequent SOAP save (with the actual revision date) is strictly after.
                         DateTime typeChangeDate = ((DateTime)currentRevisionWorkItem.Fields["System.ChangedDate"].Value).AddMilliseconds(-3);
 
-                        // Ensure the type-change date is strictly after the target's last revision date
-                        var targetLastRevDate = (DateTime)targetWorkItem.ToWorkItem().Fields["System.ChangedDate"].Value;
-                        if (typeChangeDate <= targetLastRevDate)
+                        // Ensure the type-change date is strictly after the target's last saved date
+                        if (typeChangeDate <= lastTargetSavedDate)
                         {
-                            typeChangeDate = targetLastRevDate.AddMilliseconds(1);
+                            typeChangeDate = lastTargetSavedDate.AddMilliseconds(1);
                             // Also bump the revision date to ensure SOAP save is strictly after the type-change
                             revision.ChangedDate = typeChangeDate.AddMilliseconds(1);
                         }
@@ -810,6 +815,7 @@ namespace MigrationTools.Processors
                         );
                         var result = workItemTrackingClient.UpdateWorkItemAsync(patchDocument, workItemId, bypassRules: true).Result;
                         targetWorkItem = Target.WorkItems.GetWorkItem(workItemId);
+                        lastTargetSavedDate = (DateTime)targetWorkItem.ToWorkItem().Fields["System.ChangedDate"].Value;
                     }
                     PopulateWorkItem(currentRevisionWorkItem, targetWorkItem, destType);
 
@@ -829,15 +835,22 @@ namespace MigrationTools.Processors
                         }
                     }
                     // Impersonate revision author. Mapping will apply later and may change this.
-                    // Ensure revision date is strictly after target's current ChangedDate (VS402625 fix)
-                    var targetCurrentDate = (DateTime)targetWorkItem.ToWorkItem().Fields["System.ChangedDate"].Value;
-                    if (revision.ChangedDate <= targetCurrentDate)
+                    // Ensure revision date is strictly after target's last saved date (VS402625 fix).
+                    // We use lastTargetSavedDate instead of reading from the work item, because
+                    // PopulateWorkItem already overwrote System.ChangedDate with the source date.
+                    if (revision.ChangedDate <= lastTargetSavedDate)
                     {
-                        revision.ChangedDate = targetCurrentDate.AddMilliseconds(1);
+                        revision.ChangedDate = lastTargetSavedDate.AddMilliseconds(1);
                     }
                     targetWorkItem.ToWorkItem().Fields["System.ChangedDate"].Value = revision.ChangedDate;
                     targetWorkItem.ToWorkItem().Fields["System.ChangedBy"].Value = revision.Fields["System.ChangedBy"].Value.ToString();
-                    targetWorkItem.ToWorkItem().Fields["System.History"].Value = revision.Fields["System.History"].Value;
+                    var historyValue = revision.Fields["System.History"].Value?.ToString();
+                    if (!string.IsNullOrEmpty(historyValue))
+                    {
+                        var changedBy = revision.Fields["System.ChangedBy"].Value?.ToString() ?? "Unknown";
+                        historyValue = $"<b>[Synced - Comment by {changedBy}]</b><br/>{historyValue}";
+                    }
+                    targetWorkItem.ToWorkItem().Fields["System.History"].Value = historyValue;
 
                     // Todo: Ensure all field maps use WorkItemData.Fields to apply a correct mapping
                     CommonTools.FieldMappingTool.ApplyFieldMappings(currentRevisionWorkItem, targetWorkItem);
@@ -868,6 +881,7 @@ namespace MigrationTools.Processors
                     {
 
                         targetWorkItem.SaveToAzureDevOps();
+                        lastTargetSavedDate = (DateTime)targetWorkItem.ToWorkItem().Fields["System.ChangedDate"].Value;
                     }
                     TraceWriteLine(LogEventLevel.Information,
                         " Saved TargetWorkItem {TargetWorkItemId}. Replayed revision {RevisionNumber} of {RevisionsToMigrateCount}",
