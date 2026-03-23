@@ -210,6 +210,28 @@ namespace MigrationTools.Processors
             return candidate;
         }
 
+        private static DateTime GetCurrentChangedDateOrMin(WorkItemData workItemData)
+        {
+            if (workItemData == null)
+            {
+                return DateTime.MinValue;
+            }
+
+            var workItem = workItemData.ToWorkItem();
+            if (workItem?.Fields == null || !workItem.Fields.Contains("System.ChangedDate"))
+            {
+                return DateTime.MinValue;
+            }
+
+            object changedDateValue = workItem.Fields["System.ChangedDate"].Value;
+            if (changedDateValue is DateTime changedDate)
+            {
+                return NormalizeToUtc(changedDate);
+            }
+
+            return DateTime.MinValue;
+        }
+
         protected override void InternalExecute()
         {
             Log.LogDebug("WorkItemMigrationContext::InternalExecute ");
@@ -829,9 +851,7 @@ namespace MigrationTools.Processors
 
                 // Track the last saved date on the target to ensure dates are strictly increasing (VS402625 fix).
                 // PopulateWorkItem overwrites System.ChangedDate with the source date, so we must track separately.
-                DateTime lastTargetSavedDate = targetWorkItem != null
-                    ? NormalizeToUtc((DateTime)targetWorkItem.ToWorkItem().Fields["System.ChangedDate"].Value)
-                    : DateTime.MinValue;
+                DateTime lastTargetSavedDate = GetCurrentChangedDateOrMin(targetWorkItem);
                 DateTime initialTargetLatestDate = lastTargetSavedDate;
 
                 foreach (var revision in revisionsToMigrate)
