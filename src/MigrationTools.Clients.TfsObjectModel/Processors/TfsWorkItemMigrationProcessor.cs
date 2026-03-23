@@ -768,9 +768,10 @@ namespace MigrationTools.Processors
                         // Ensure the type-change date is strictly after the target's last saved date
                         if (typeChangeDate <= lastTargetSavedDate)
                         {
-                            typeChangeDate = lastTargetSavedDate.AddMilliseconds(1);
-                            // Also bump the revision date to ensure SOAP save is strictly after the type-change
-                            revision.ChangedDate = typeChangeDate.AddMilliseconds(1);
+                            // Azure DevOps can still reject sub-second bumps as non-increasing.
+                            typeChangeDate = lastTargetSavedDate.AddSeconds(1);
+                            // Also bump the revision date to ensure SOAP save is strictly after the type-change.
+                            revision.ChangedDate = typeChangeDate.AddSeconds(1);
                         }
 
                         patchDocument.Add(
@@ -840,7 +841,7 @@ namespace MigrationTools.Processors
                     // PopulateWorkItem already overwrote System.ChangedDate with the source date.
                     if (revision.ChangedDate <= lastTargetSavedDate)
                     {
-                        revision.ChangedDate = lastTargetSavedDate.AddMilliseconds(1);
+                        revision.ChangedDate = lastTargetSavedDate.AddSeconds(1);
                     }
                     targetWorkItem.ToWorkItem().Fields["System.ChangedDate"].Value = revision.ChangedDate;
                     targetWorkItem.ToWorkItem().Fields["System.ChangedBy"].Value = revision.Fields["System.ChangedBy"].Value.ToString();
