@@ -232,6 +232,52 @@ namespace MigrationTools.Processors
             return DateTime.MinValue;
         }
 
+        private static DateTime GetLatestPersistedChangedDateOrMin(WorkItemData workItemData)
+        {
+            if (workItemData == null)
+            {
+                return DateTime.MinValue;
+            }
+
+            var workItem = workItemData.ToWorkItem();
+            if (workItem == null)
+            {
+                return DateTime.MinValue;
+            }
+
+            DateTime latestPersisted = DateTime.MinValue;
+            foreach (Revision revision in workItem.Revisions)
+            {
+                if (!revision.Fields.Contains("System.ChangedDate"))
+                {
+                    continue;
+                }
+
+                if (revision.Fields["System.ChangedDate"].Value is DateTime revisionChangedDate)
+                {
+                    DateTime revisionChangedDateUtc = NormalizeToUtc(revisionChangedDate);
+                    if (revisionChangedDateUtc > latestPersisted)
+                    {
+                        latestPersisted = revisionChangedDateUtc;
+                    }
+                }
+            }
+
+            return latestPersisted != DateTime.MinValue ? latestPersisted : GetCurrentChangedDateOrMin(workItemData);
+        }
+
+        private static void StampSafePostProcessingChangedDate(WorkItemData workItemData)
+        {
+            if (workItemData?.ToWorkItem() == null)
+            {
+                return;
+            }
+
+            DateTime latestPersistedChangedDate = GetLatestPersistedChangedDateOrMin(workItemData);
+            DateTime safeChangedDate = ClampReplayDate(DateTime.UtcNow, latestPersistedChangedDate);
+            workItemData.ToWorkItem().Fields["System.ChangedDate"].Value = safeChangedDate;
+        }
+
         protected override void InternalExecute()
         {
             Log.LogDebug("WorkItemMigrationContext::InternalExecute ");
@@ -720,6 +766,7 @@ namespace MigrationTools.Processors
                         }
                         if (targetWorkItem != null && targetWorkItem.ToWorkItem().IsDirty)
                         {
+                            StampSafePostProcessingChangedDate(targetWorkItem);
                             targetWorkItem.SaveToAzureDevOps();
                         }
                         else if (targetWorkItem != null)
@@ -1066,6 +1113,7 @@ namespace MigrationTools.Processors
                     if (targetWorkItem.ToWorkItem().IsDirty)
                     {
                         targetWorkItem.ToWorkItem().Fields["System.ChangedBy"].Value = "Migration";
+                        StampSafePostProcessingChangedDate(targetWorkItem);
                         targetWorkItem.SaveToAzureDevOps();
                         TraceWriteLine(LogEventLevel.Information, "...Saved as {TargetWorkItemId}", new Dictionary<string, object> { { "TargetWorkItemId", targetWorkItem.Id } });
                     }
