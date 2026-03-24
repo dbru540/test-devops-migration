@@ -984,7 +984,7 @@ namespace MigrationTools.Processors
                 lastSavedDate = (DateTime)targetWorkItem.ToWorkItem().Fields["System.ChangedDate"].Value;
                 return true;
             }
-            catch (Exception ex) when (ex.ToString().Contains("VS402625"))
+            catch (Exception ex) when (ex.ToString().Contains("VS402625") || ex.ToString().Contains("VS402624"))
             {
                 string commentText = historyValue?.Trim();
                 if (string.IsNullOrEmpty(commentText))
@@ -1160,9 +1160,15 @@ namespace MigrationTools.Processors
                     // Impersonate revision author.
                     // Ensure revision date is strictly after last persisted date (VS402625 fix).
                     // Use lastSavedDate (not in-memory field) and bump by 1s (not 1ms) for server precision.
+                    // Also clamp to not exceed current time (VS402624 fix).
                     if (revision.ChangedDate <= lastSavedDate)
                     {
                         revision.ChangedDate = lastSavedDate.AddSeconds(1);
+                    }
+                    DateTime nowUtc = DateTime.UtcNow;
+                    if (revision.ChangedDate > nowUtc)
+                    {
+                        revision.ChangedDate = nowUtc;
                     }
                     targetWorkItem.ToWorkItem().Fields["System.ChangedDate"].Value = revision.ChangedDate;
                     targetWorkItem.ToWorkItem().Fields["System.ChangedBy"].Value = revision.Fields["System.ChangedBy"].Value.ToString();
