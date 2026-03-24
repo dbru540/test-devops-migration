@@ -570,11 +570,12 @@ namespace MigrationTools.Processors
                             { "ReplayRevisions", CommonTools.RevisionManager.ReplayRevisions }}
                             );
                         List<RevisionItem> revisionsToMigrate = CommonTools.RevisionManager.GetRevisionsToMigrate(sourceWorkItem.Revisions.Values.ToList(), targetWorkItem?.Revisions.Values.ToList());
+                        bool revisionReplayRan = false;
                         if (targetWorkItem == null)
                         {
                             targetWorkItem = ReplayRevisions(revisionsToMigrate, sourceWorkItem, null);
                             activity?.SetTag("Revisions", revisionsToMigrate.Count);
-
+                            revisionReplayRan = true;
                         }
                         else
                         {
@@ -596,6 +597,7 @@ namespace MigrationTools.Processors
                                     });
 
                                 targetWorkItem = ReplayRevisions(revisionsToMigrate, sourceWorkItem, targetWorkItem);
+                                revisionReplayRan = true;
                             }
                         }
                         if (targetWorkItem != null && targetWorkItem.ToWorkItem().IsDirty)
@@ -609,7 +611,13 @@ namespace MigrationTools.Processors
                         }
                         if (targetWorkItem != null)
                         {
-                            await SyncMissingCommentsAsync(sourceWorkItem, targetWorkItem);
+                            // Only sync comments via API when revision replay couldn't run
+                            // (date-based filtering prevented it). When replay ran, comments
+                            // are already handled via System.History revision replay.
+                            if (!revisionReplayRan)
+                            {
+                                await SyncMissingCommentsAsync(sourceWorkItem, targetWorkItem);
+                            }
                             targetWorkItem.ToWorkItem().Close();
                         }
                         if (sourceWorkItem != null)
