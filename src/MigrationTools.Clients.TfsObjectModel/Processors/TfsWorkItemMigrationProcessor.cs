@@ -703,6 +703,71 @@ namespace MigrationTools.Processors
             }
         }
 
+        private readonly Dictionary<int, int> _sourceToTargetIdCache = new Dictionary<int, int>();
+
+        private int? ResolveTargetWorkItemId(int sourceWorkItemId)
+        {
+            if (_sourceToTargetIdCache.TryGetValue(sourceWorkItemId, out int cached))
+                return cached == -1 ? (int?)null : cached;
+
+            try
+            {
+                string sourceOrg = Source.Options.Collection.AbsoluteUri.TrimEnd('/');
+                string sourceProject = Source.Options.Project;
+                string reflectedId = $"{sourceOrg}/{sourceProject}/_workitems/edit/{sourceWorkItemId}";
+                var targetWi = Target.WorkItems.FindReflectedWorkItemByReflectedWorkItemId(reflectedId);
+                if (targetWi != null && int.TryParse(targetWi.Id, out int targetId))
+                {
+                    _sourceToTargetIdCache[sourceWorkItemId] = targetId;
+                    return targetId;
+                }
+            }
+            catch { }
+            _sourceToTargetIdCache[sourceWorkItemId] = -1;
+            return null;
+        }
+
+        private string RewriteCommentWorkItemLinks(string commentHtml)
+        {
+            if (string.IsNullOrWhiteSpace(commentHtml)) return commentHtml;
+
+            string sourceOrg = Source.Options.Collection.AbsoluteUri.TrimEnd('/');
+            string targetOrg = Target.Options.Collection.AbsoluteUri.TrimEnd('/');
+            string targetProject = Target.Options.Project;
+
+            // Match work item URLs: .../org/project/_workitems/edit/12345
+            var wiUrlRegex = new System.Text.RegularExpressions.Regex(
+                @"https?://dev\.azure\.com/[^""'\s]+/_workitems/edit/(?<id>\d+)",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+            commentHtml = wiUrlRegex.Replace(commentHtml, match =>
+            {
+                if (int.TryParse(match.Groups["id"].Value, out int sourceId))
+                {
+                    int? targetId = ResolveTargetWorkItemId(sourceId);
+                    if (targetId.HasValue)
+                        return $"{targetOrg}/{Uri.EscapeDataString(targetProject)}/_workitems/edit/{targetId.Value}";
+                }
+                return match.Value; // keep original if no mapping found
+            });
+
+            // Match #12345 style mentions (inside mention widgets or plain text)
+            var hashMentionRegex = new System.Text.RegularExpressions.Regex(
+                @"(?<=#)\b(\d{4,})\b");
+            commentHtml = hashMentionRegex.Replace(commentHtml, match =>
+            {
+                if (int.TryParse(match.Value, out int sourceId))
+                {
+                    int? targetId = ResolveTargetWorkItemId(sourceId);
+                    if (targetId.HasValue)
+                        return targetId.Value.ToString();
+                }
+                return match.Value;
+            });
+
+            return commentHtml;
+        }
+
         private static string NormalizeCommentForComparison(string text)
         {
             if (string.IsNullOrWhiteSpace(text)) return string.Empty;
@@ -711,6 +776,15 @@ namespace MigrationTools.Processors
                 @"<b>\[Synced comment -.*?\]</b><br/?>", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
             n = System.Text.RegularExpressions.Regex.Replace(n,
                 @"<b>\[BACKFILL -.*?\]</b><br/?>", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            // Strip mention widgets (contain org-specific WI IDs that differ between source/target)
+            n = System.Text.RegularExpressions.Regex.Replace(n,
+                @"<!--MentionBegin-->.*?<!--MentionEnd-->", " [WI-REF] ", System.Text.RegularExpressions.RegexOptions.Singleline);
+            // Normalize WI URLs to just [WI-REF] (IDs differ between orgs)
+            n = System.Text.RegularExpressions.Regex.Replace(n,
+                @"https?://dev\.azure\.com/[^""'\s]+/_workitems/edit/\d+", "[WI-REF]");
+            // Normalize attachment URLs (GUIDs differ between orgs)
+            n = System.Text.RegularExpressions.Regex.Replace(n,
+                @"https?://dev\.azure\.com/[^""'\s]+/_apis/wit/attachments/[^""'\s]+", "[IMG-REF]");
             // Strip HTML tags
             n = System.Text.RegularExpressions.Regex.Replace(n, "<[^>]+>", " ");
             n = WebUtility.HtmlDecode(n);
@@ -778,11 +852,15 @@ namespace MigrationTools.Processors
                 }
 
                 // Post missing comments with author/date header
+                // Note: images and WI links still reference the source org (attachment GUIDs
+                // and WI IDs are org-specific and cannot be simply URL-replaced)
                 foreach (var comment in missing)
                 {
                     string author = comment["createdBy"]?["displayName"]?.ToString() ?? "Unknown";
                     string date = comment["createdDate"]?.ToString() ?? "Unknown";
                     string originalText = comment["text"]?.ToString() ?? "";
+                    originalText = RewriteCommentImagesForTarget(originalText, targetId);
+                    originalText = RewriteCommentWorkItemLinks(originalText);
                     string headerHtml = $"<b>[Synced comment - Original author: {WebUtility.HtmlEncode(author)} - Date: {date}]</b><br/>";
                     PostCommentViaApi(targetId, headerHtml + originalText);
                 }
@@ -795,6 +873,76 @@ namespace MigrationTools.Processors
                 TraceWriteLine(LogEventLevel.Warning, "Comment sync failed for {TargetWorkItemId}: {ErrorMessage}",
                     new Dictionary<string, object>() { { "TargetWorkItemId", targetWorkItem.Id }, { "ErrorMessage", ex.Message } });
             }
+        }
+
+        private string RewriteCommentImagesForTarget(string commentHtml, int targetWorkItemId)
+        {
+            if (string.IsNullOrWhiteSpace(commentHtml)) return commentHtml;
+
+            string sourceOrg = Source.Options.Collection.AbsoluteUri.TrimEnd('/');
+            string sourcePat = Source.Options.Authentication.AccessToken;
+            string targetPat = Target.Options.Authentication.AccessToken;
+            string targetBaseUri = Target.Options.Collection.AbsoluteUri.TrimEnd('/');
+            string targetProject = Uri.EscapeDataString(Target.Options.Project);
+
+            // Match attachment URLs from source org
+            var attachmentRegex = new System.Text.RegularExpressions.Regex(
+                @"https?://dev\.azure\.com/[^""'\s]+/_apis/wit/attachments/[^""'\s]+",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+            var matches = attachmentRegex.Matches(commentHtml);
+            if (matches.Count == 0) return commentHtml;
+
+            using (var downloadClient = new HttpClient { Timeout = TimeSpan.FromMinutes(2) })
+            {
+                downloadClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
+                    "Basic", Convert.ToBase64String(Encoding.ASCII.GetBytes($":{sourcePat}")));
+
+                using (var uploadClient = new HttpClient { Timeout = TimeSpan.FromMinutes(2) })
+                {
+                    uploadClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
+                        "Basic", Convert.ToBase64String(Encoding.ASCII.GetBytes($":{targetPat}")));
+
+                    foreach (System.Text.RegularExpressions.Match match in matches)
+                    {
+                        string originalUrl = WebUtility.HtmlDecode(match.Value);
+                        // Only rewrite URLs from the source org
+                        if (originalUrl.IndexOf(sourceOrg, StringComparison.OrdinalIgnoreCase) < 0 &&
+                            !originalUrl.ToLowerInvariant().Contains(Source.Options.Collection.Host.ToLowerInvariant()))
+                            continue;
+
+                        try
+                        {
+                            // Download from source
+                            var imageBytes = downloadClient.GetByteArrayAsync(originalUrl).Result;
+                            // Extract filename from URL
+                            var fileNameMatch = System.Text.RegularExpressions.Regex.Match(originalUrl, @"fileName=([^&\s]+)");
+                            string fileName = fileNameMatch.Success ? fileNameMatch.Groups[1].Value : "image.png";
+
+                            // Upload to target
+                            string uploadUrl = $"{targetBaseUri}/{targetProject}/_apis/wit/attachments?fileName={Uri.EscapeDataString(fileName)}&api-version=7.1";
+                            using (var uploadContent = new ByteArrayContent(imageBytes))
+                            {
+                                uploadContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
+                                var uploadResponse = uploadClient.PostAsync(uploadUrl, uploadContent).Result;
+                                uploadResponse.EnsureSuccessStatusCode();
+                                var responseJson = Newtonsoft.Json.Linq.JObject.Parse(uploadResponse.Content.ReadAsStringAsync().Result);
+                                string newUrl = responseJson["url"]?.ToString();
+                                if (!string.IsNullOrEmpty(newUrl))
+                                {
+                                    commentHtml = commentHtml.Replace(match.Value, newUrl);
+                                    commentHtml = commentHtml.Replace(WebUtility.HtmlEncode(match.Value), newUrl);
+                                }
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Log.LogWarning("Failed to rewrite image {Url} in comment: {Error}", originalUrl, ex.Message);
+                        }
+                    }
+                }
+            }
+            return commentHtml;
         }
 
         private void PostCommentViaApi(int targetWorkItemId, string commentHtml)
