@@ -829,11 +829,18 @@ namespace MigrationTools.Processors
                 }
 
                 // Find missing source comments (skip synced/backfilled copies to prevent loops)
+                // Determine sync service account names to skip their comments (they are copies, not originals)
+                string sourceSyncAccount = Source.Options.Authentication.AccessToken != null ? "svc" : "";
                 var missing = new List<Newtonsoft.Json.Linq.JToken>();
                 foreach (var sc in sourceComments)
                 {
                     string rawText = sc["text"]?.ToString() ?? "";
-                    // Skip comments that are already synced copies (they have our header)
+                    string commentAuthor = sc["createdBy"]?["displayName"]?.ToString() ?? "";
+                    // Skip comments created by the sync service account (always copies)
+                    if (commentAuthor.IndexOf("svc", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                        commentAuthor.IndexOf("msflow", StringComparison.OrdinalIgnoreCase) >= 0)
+                        continue;
+                    // Also skip by content header as fallback
                     if (rawText.Contains("[Synced comment -") || rawText.Contains("[BACKFILL -"))
                         continue;
 
