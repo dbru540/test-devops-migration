@@ -224,6 +224,17 @@ namespace MigrationTools.Processors
             return $"{BackfilledCommentMarker}<b>[BACKFILLED COMMENT - Source rev {revision.Number} - Original date {originalChangedDateUtc:yyyy-MM-dd HH:mm:ss} UTC - Author {changedBy}]</b><br/>{normalizedHistoryValue}";
         }
 
+        private static string BuildSyncedHistoryValue(string rawHistoryValue)
+        {
+            string normalizedHistoryValue = NormalizeHistoryValue(rawHistoryValue);
+            if (string.IsNullOrWhiteSpace(normalizedHistoryValue))
+            {
+                return null;
+            }
+
+            return $"{SyncedCommentMarker}{normalizedHistoryValue}";
+        }
+
         private static DateTime ClampReplayDate(DateTime candidate, DateTime floorExclusiveUtc)
         {
             DateTime nowUtc = DateTime.UtcNow.AddSeconds(-1);
@@ -993,6 +1004,7 @@ namespace MigrationTools.Processors
                     }
 
                     bool shouldBackfillCommentOnly =
+                        !Options.SyncCommentsUsingApi &&
                         targetWorkItem != null &&
                         !string.IsNullOrWhiteSpace(rawHistoryValue) &&
                         originalRevisionDateUtc <= initialTargetLatestDate &&
@@ -1000,14 +1012,17 @@ namespace MigrationTools.Processors
 
                     if (shouldBackfillCommentOnly)
                     {
-                        targetWorkItem.ToWorkItem().Fields["System.History"].Value = BuildBackfilledHistoryValue(revision, rawHistoryValue);
+                        DateTime replayDate = ClampReplayDate(originalRevisionDateUtc, lastTargetSavedDate);
+                        targetWorkItem.ToWorkItem().Fields["System.ChangedDate"].Value = replayDate;
+                        targetWorkItem.ToWorkItem().Fields["System.ChangedBy"].Value = revision.Fields["System.ChangedBy"].Value.ToString();
+                        targetWorkItem.ToWorkItem().Fields["System.History"].Value = BuildSyncedHistoryValue(rawHistoryValue);
                         ProcessHTMLFieldAttachements(targetWorkItem);
                         ProcessWorkItemEmbeddedLinks(sourceWorkItem, targetWorkItem);
                         targetWorkItem.SaveToAzureDevOps();
                         lastTargetSavedDate = NormalizeToUtc((DateTime)targetWorkItem.ToWorkItem().Fields["System.ChangedDate"].Value);
 
                         TraceWriteLine(LogEventLevel.Information,
-                            " Backfilled missing comment from revision {RevisionNumber} onto TargetWorkItem {TargetWorkItemId}",
+                            " Replayed missing comment from revision {RevisionNumber} onto TargetWorkItem {TargetWorkItemId} without visible backfill wrapper",
                             new Dictionary<string, object>()
                             {
                                 { "RevisionNumber", revision.Number },
@@ -1124,11 +1139,9 @@ namespace MigrationTools.Processors
                     revision.ChangedDate = ClampReplayDate(revision.ChangedDate, lastTargetSavedDate);
                     targetWorkItem.ToWorkItem().Fields["System.ChangedDate"].Value = revision.ChangedDate;
                     targetWorkItem.ToWorkItem().Fields["System.ChangedBy"].Value = revision.Fields["System.ChangedBy"].Value.ToString();
-                    var historyValue = isMigrationGeneratedHistory ? null : rawHistoryValue;
-                    if (!string.IsNullOrEmpty(historyValue))
-                    {
-                        historyValue = $"{SyncedCommentMarker}{historyValue}";
-                    }
+                    var historyValue = Options.SyncCommentsUsingApi
+                        ? null
+                        : (isMigrationGeneratedHistory ? null : BuildSyncedHistoryValue(rawHistoryValue));
                     targetWorkItem.ToWorkItem().Fields["System.History"].Value = historyValue;
 
                     // Todo: Ensure all field maps use WorkItemData.Fields to apply a correct mapping
