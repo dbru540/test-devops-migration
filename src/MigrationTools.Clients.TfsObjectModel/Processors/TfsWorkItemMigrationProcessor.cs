@@ -856,9 +856,8 @@ namespace MigrationTools.Processors
                     return;
                 }
 
-                // Post missing comments with author/date header
-                // Note: images and WI links still reference the source org (attachment GUIDs
-                // and WI IDs are org-specific and cannot be simply URL-replaced)
+                // Post missing comments in chronological order (API returns newest first)
+                missing.Reverse();
                 foreach (var comment in missing)
                 {
                     string author = comment["createdBy"]?["displayName"]?.ToString() ?? "Unknown";
