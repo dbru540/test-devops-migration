@@ -4,6 +4,8 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
 using System.Net;
+using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Text;
 using System.Threading.Tasks;
 using Microsoft.Extensions.DependencyInjection;
@@ -700,6 +702,76 @@ namespace MigrationTools.Processors
             }
         }
 
+        private void PostCommentViaApi(int targetWorkItemId, string commentHtml)
+        {
+            string project = Uri.EscapeDataString(Target.Options.Project);
+            string baseUri = Target.Options.Collection.AbsoluteUri.TrimEnd('/');
+            string requestUri = $"{baseUri}/{project}/_apis/wit/workItems/{targetWorkItemId}/comments?api-version=7.1-preview.4";
+            string token = Target.Options.Authentication.AccessToken;
+
+            using (var client = new HttpClient())
+            {
+                client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
+                    "Basic", Convert.ToBase64String(Encoding.ASCII.GetBytes($":{token}")));
+                var payload = new Newtonsoft.Json.Linq.JObject { ["text"] = commentHtml };
+                using (var content = new StringContent(payload.ToString(), Encoding.UTF8, "application/json"))
+                using (var response = client.PostAsync(requestUri, content).Result)
+                {
+                    response.EnsureSuccessStatusCode();
+                }
+            }
+        }
+
+        private bool TrySaveOrFallbackComment(WorkItemData targetWorkItem, RevisionItem revision, string historyValue, ref DateTime lastSavedDate)
+        {
+            try
+            {
+                targetWorkItem.SaveToAzureDevOps();
+                lastSavedDate = (DateTime)targetWorkItem.ToWorkItem().Fields["System.ChangedDate"].Value;
+                return true;
+            }
+            catch (Exception ex) when (ex.ToString().Contains("VS402625"))
+            {
+                string commentText = historyValue?.Trim();
+                if (string.IsNullOrEmpty(commentText))
+                {
+                    Log.LogWarning("VS402625 on revision {RevisionNumber} with no comment - skipping", revision.Number);
+                    return false;
+                }
+
+                string author = revision.Fields.ContainsKey("System.ChangedBy")
+                    ? revision.Fields["System.ChangedBy"].Value?.ToString() ?? "Unknown"
+                    : "Unknown";
+                DateTime originalDate = revision.OriginalChangedDate == default ? revision.ChangedDate : revision.OriginalChangedDate;
+
+                // Clear the history and re-save without it
+                targetWorkItem.ToWorkItem().Fields["System.History"].Value = null;
+                try
+                {
+                    targetWorkItem.SaveToAzureDevOps();
+                    lastSavedDate = (DateTime)targetWorkItem.ToWorkItem().Fields["System.ChangedDate"].Value;
+                }
+                catch
+                {
+                    Log.LogWarning("VS402625 fallback: field-only save also failed for revision {RevisionNumber} - skipping", revision.Number);
+                    return false;
+                }
+
+                // Post comment via REST API with original author/date header
+                int targetId = int.Parse(targetWorkItem.Id);
+                string headerHtml = $"<b>[Synced comment - Original author: {WebUtility.HtmlEncode(author)} - Date: {originalDate:yyyy-MM-dd HH:mm:ss} UTC]</b><br/>";
+                PostCommentViaApi(targetId, headerHtml + commentText);
+
+                TraceWriteLine(LogEventLevel.Warning,
+                    "VS402625 on revision {RevisionNumber}: comment posted via API fallback for TargetWorkItem {TargetWorkItemId}",
+                    new Dictionary<string, object>() {
+                        { "RevisionNumber", revision.Number },
+                        { "TargetWorkItemId", targetWorkItem.Id }
+                    });
+                return true;
+            }
+        }
+
         private WorkItemData ReplayRevisions(List<RevisionItem> revisionsToMigrate, WorkItemData sourceWorkItem, WorkItemData targetWorkItem)
         {
             try
@@ -869,8 +941,8 @@ namespace MigrationTools.Processors
 
                     if (!skipIterationRevision && !skipAreaRevision)
                     {
-                        targetWorkItem.SaveToAzureDevOps();
-                        lastSavedDate = (DateTime)targetWorkItem.ToWorkItem().Fields["System.ChangedDate"].Value;
+                        string historyForFallback = targetWorkItem.ToWorkItem().Fields["System.History"].Value?.ToString();
+                        TrySaveOrFallbackComment(targetWorkItem, revision, historyForFallback, ref lastSavedDate);
                     }
                     TraceWriteLine(LogEventLevel.Information,
                         " Saved TargetWorkItem {TargetWorkItemId}. Replayed revision {RevisionNumber} of {RevisionsToMigrateCount}",
