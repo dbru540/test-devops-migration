@@ -609,6 +609,7 @@ namespace MigrationTools.Processors
                         }
                         if (targetWorkItem != null)
                         {
+                            await SyncMissingCommentsAsync(sourceWorkItem, targetWorkItem);
                             targetWorkItem.ToWorkItem().Close();
                         }
                         if (sourceWorkItem != null)
@@ -699,6 +700,100 @@ namespace MigrationTools.Processors
             {
                 CommonTools.WorkItemLink.MigrateSharedSteps(this, sourceWorkItem, targetWorkItem);
                 CommonTools.WorkItemLink.MigrateSharedParameters(this, sourceWorkItem, targetWorkItem);
+            }
+        }
+
+        private static string NormalizeCommentForComparison(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return string.Empty;
+            // Strip synced/backfill headers
+            string n = System.Text.RegularExpressions.Regex.Replace(text,
+                @"<b>\[Synced comment -.*?\]</b><br/?>", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            n = System.Text.RegularExpressions.Regex.Replace(n,
+                @"<b>\[BACKFILL -.*?\]</b><br/?>", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            // Strip HTML tags
+            n = System.Text.RegularExpressions.Regex.Replace(n, "<[^>]+>", " ");
+            n = WebUtility.HtmlDecode(n);
+            n = System.Text.RegularExpressions.Regex.Replace(n, @"\s+", " ").Trim();
+            return n;
+        }
+
+        private Newtonsoft.Json.Linq.JArray GetCommentsViaApi(string baseUri, string project, string token, int workItemId)
+        {
+            string requestUri = $"{baseUri.TrimEnd('/')}/{Uri.EscapeDataString(project)}/_apis/wit/workItems/{workItemId}/comments?api-version=7.1-preview.4&$top=200";
+            using (var client = new HttpClient())
+            {
+                client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
+                    "Basic", Convert.ToBase64String(Encoding.ASCII.GetBytes($":{token}")));
+                string json = client.GetStringAsync(requestUri).Result;
+                var data = Newtonsoft.Json.Linq.JObject.Parse(json);
+                return (Newtonsoft.Json.Linq.JArray)data["comments"] ?? new Newtonsoft.Json.Linq.JArray();
+            }
+        }
+
+        private async Task SyncMissingCommentsAsync(WorkItemData sourceWorkItem, WorkItemData targetWorkItem)
+        {
+            if (sourceWorkItem == null || targetWorkItem == null) return;
+            if (!int.TryParse(sourceWorkItem.Id, out int sourceId) || !int.TryParse(targetWorkItem.Id, out int targetId)) return;
+
+            try
+            {
+                var sourceComments = GetCommentsViaApi(
+                    Source.Options.Collection.AbsoluteUri, Source.Options.Project,
+                    Source.Options.Authentication.AccessToken, sourceId);
+                var targetComments = GetCommentsViaApi(
+                    Target.Options.Collection.AbsoluteUri, Target.Options.Project,
+                    Target.Options.Authentication.AccessToken, targetId);
+
+                // Build target lookup by normalized content with counts
+                var targetCounts = new Dictionary<string, int>(StringComparer.Ordinal);
+                foreach (var tc in targetComments)
+                {
+                    string key = NormalizeCommentForComparison(tc["text"]?.ToString());
+                    if (string.IsNullOrEmpty(key)) continue;
+                    targetCounts[key] = targetCounts.ContainsKey(key) ? targetCounts[key] + 1 : 1;
+                }
+
+                // Find missing source comments
+                var missing = new List<Newtonsoft.Json.Linq.JToken>();
+                foreach (var sc in sourceComments)
+                {
+                    string key = NormalizeCommentForComparison(sc["text"]?.ToString());
+                    if (string.IsNullOrEmpty(key)) continue;
+                    if (targetCounts.ContainsKey(key) && targetCounts[key] > 0)
+                    {
+                        targetCounts[key]--;
+                    }
+                    else
+                    {
+                        missing.Add(sc);
+                    }
+                }
+
+                if (missing.Count == 0)
+                {
+                    TraceWriteLine(LogEventLevel.Debug, "Comment sync: all {SourceCount} source comments found on target {TargetWorkItemId}",
+                        new Dictionary<string, object>() { { "SourceCount", sourceComments.Count }, { "TargetWorkItemId", targetWorkItem.Id } });
+                    return;
+                }
+
+                // Post missing comments with author/date header
+                foreach (var comment in missing)
+                {
+                    string author = comment["createdBy"]?["displayName"]?.ToString() ?? "Unknown";
+                    string date = comment["createdDate"]?.ToString() ?? "Unknown";
+                    string originalText = comment["text"]?.ToString() ?? "";
+                    string headerHtml = $"<b>[Synced comment - Original author: {WebUtility.HtmlEncode(author)} - Date: {date}]</b><br/>";
+                    PostCommentViaApi(targetId, headerHtml + originalText);
+                }
+
+                TraceWriteLine(LogEventLevel.Information, "Comment sync: posted {MissingCount} missing comments to {TargetWorkItemId}",
+                    new Dictionary<string, object>() { { "MissingCount", missing.Count }, { "TargetWorkItemId", targetWorkItem.Id } });
+            }
+            catch (Exception ex)
+            {
+                TraceWriteLine(LogEventLevel.Warning, "Comment sync failed for {TargetWorkItemId}: {ErrorMessage}",
+                    new Dictionary<string, object>() { { "TargetWorkItemId", targetWorkItem.Id }, { "ErrorMessage", ex.Message } });
             }
         }
 
