@@ -609,7 +609,6 @@ namespace MigrationTools.Processors
                         }
                         if (targetWorkItem != null)
                         {
-                            await SyncMissingCommentsAsync(sourceWorkItem, targetWorkItem);
                             targetWorkItem.ToWorkItem().Close();
                         }
                         if (sourceWorkItem != null)
@@ -1060,6 +1059,30 @@ namespace MigrationTools.Processors
                 foreach (var revision in revisionsToMigrate)
                 {
                     workItemMetrics.RevisionsProcessedCount.Add(1);
+
+                    // Skip sync-generated revisions to prevent bidirectional loops
+                    string revChangedBy = revision.Fields.ContainsKey("System.ChangedBy")
+                        ? revision.Fields["System.ChangedBy"].Value?.ToString() ?? ""
+                        : "";
+                    string revHistory = revision.Fields.ContainsKey("System.History")
+                        ? revision.Fields["System.History"].Value?.ToString() ?? ""
+                        : "";
+                    bool isSyncGenerated =
+                        (revChangedBy.IndexOf("svc", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                         revChangedBy.IndexOf("msflow", StringComparison.OrdinalIgnoreCase) >= 0) ||
+                        revChangedBy.Equals("Migration", StringComparison.OrdinalIgnoreCase) ||
+                        revHistory.Contains("[Synced comment -") ||
+                        revHistory.Contains("[BACKFILL -");
+                    if (isSyncGenerated)
+                    {
+                        TraceWriteLine(LogEventLevel.Information, " Skipping sync-generated revision [{RevisionNumber}] (ChangedBy: {ChangedBy})",
+                            new Dictionary<string, object>() {
+                                {"RevisionNumber", revision.Number },
+                                {"ChangedBy", revChangedBy }
+                            });
+                        continue;
+                    }
+
                     var currentRevisionWorkItem = sourceWorkItem.GetRevision(revision.Number);
 
                     TraceWriteLine(LogEventLevel.Information, " Processing Revision [{RevisionNumber}]",
