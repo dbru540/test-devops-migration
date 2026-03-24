@@ -609,6 +609,7 @@ namespace MigrationTools.Processors
                         }
                         if (targetWorkItem != null)
                         {
+                            await SyncMissingCommentsAsync(sourceWorkItem, targetWorkItem);
                             targetWorkItem.ToWorkItem().Close();
                         }
                         if (sourceWorkItem != null)
