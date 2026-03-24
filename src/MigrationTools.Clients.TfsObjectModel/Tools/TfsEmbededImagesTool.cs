@@ -68,6 +68,65 @@ namespace MigrationTools.Tools
             return 0;
         }
 
+        public string RewriteHtml(TfsProcessor processor, WorkItemData targetWorkItem, string htmlValue)
+        {
+            if (string.IsNullOrWhiteSpace(htmlValue) || targetWorkItem == null)
+            {
+                return htmlValue;
+            }
+
+            _processor = processor;
+            _targetProject = processor.Target.WorkItems.Project.ToProject();
+
+            string sourceToken = processor.Source.Options.Authentication.AuthenticationMode switch
+            {
+                AuthenticationMode.AccessToken => processor.Source.Options.Authentication.AccessToken,
+                AuthenticationMode.Windows => GetWindowsAuthToken(processor.Source.Options.Authentication.NetworkCredentials),
+                _ => null
+            };
+
+            string targetOrg = ExtractOrganization(processor.Target.Options.Collection.AbsoluteUri);
+            string modifiedValue = htmlValue;
+            string pattern = @"https://dev\.azure\.com/[^/]+/[^""'\s<>]+";
+            MatchCollection matches = Regex.Matches(htmlValue, pattern);
+
+            foreach (Match match in matches)
+            {
+                string imageUrl = WebUtility.HtmlDecode(match.Value);
+                string imageOrg = ExtractOrganization(imageUrl);
+                if (!imageUrl.Contains("/_apis/wit/attachments/") ||
+                    imageOrg.Equals(targetOrg, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                string cacheKey = $"{imageUrl}→{targetOrg}";
+                string newImageLink = "";
+
+                if (_cachedUploadedUrisBySourceValue.ContainsKey(cacheKey))
+                {
+                    newImageLink = _cachedUploadedUrisBySourceValue[cacheKey];
+                }
+                else
+                {
+                    string downloadToken = DetermineAccessToken(imageUrl, sourceToken);
+                    newImageLink = UploadedAndRetrieveAttachmentLinkUrl(imageUrl, "CommentHtml", targetWorkItem, downloadToken);
+                    if (!string.IsNullOrWhiteSpace(newImageLink))
+                    {
+                        _cachedUploadedUrisBySourceValue[cacheKey] = newImageLink;
+                    }
+                }
+
+                if (!string.IsNullOrWhiteSpace(newImageLink))
+                {
+                    modifiedValue = modifiedValue.Replace(match.Value, newImageLink);
+                    modifiedValue = modifiedValue.Replace(WebUtility.HtmlEncode(match.Value), newImageLink);
+                }
+            }
+
+            return modifiedValue;
+        }
+
         private string GetWindowsAuthToken(NetworkCredentials cred)
             => Convert.ToBase64String(Encoding.ASCII.GetBytes($"{cred.Domain}\\{cred.UserName}:{cred.Password}"));
 

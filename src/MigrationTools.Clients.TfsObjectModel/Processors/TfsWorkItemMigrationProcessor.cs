@@ -86,12 +86,14 @@ namespace MigrationTools.Processors
         private ILogger contextLog;
         private ILogger workItemLog;
         private List<string> _itemsInError;
+        private readonly TfsWorkItemCommentsTool _commentsTool;
 
         public WorkItemMetrics workItemMetrics { get; private set; }
 
         public TfsWorkItemMigrationProcessor(
             IOptions<TfsWorkItemMigrationProcessorOptions> options,
             TfsCommonTools tfsCommonTools,
+            TfsWorkItemCommentsTool commentsTool,
             ProcessorEnricherContainer processorEnrichers,
             IServiceProvider services,
             ITelemetryLogger telemetry,
@@ -100,6 +102,7 @@ namespace MigrationTools.Processors
         {
             contextLog = Serilog.Log.ForContext<TfsWorkItemMigrationProcessor>();
             workItemMetrics = services.GetRequiredService<WorkItemMetrics>();
+            _commentsTool = commentsTool;
         }
 
         new TfsWorkItemMigrationProcessorOptions Options => (TfsWorkItemMigrationProcessorOptions)base.Options;
@@ -146,6 +149,20 @@ namespace MigrationTools.Processors
             return normalized;
         }
 
+        private static string NormalizeVisibleHistoryValue(string historyValue)
+        {
+            string normalized = NormalizeHistoryValue(historyValue);
+            if (string.IsNullOrWhiteSpace(normalized))
+            {
+                return string.Empty;
+            }
+
+            normalized = Regex.Replace(normalized, "<[^>]+>", " ");
+            normalized = WebUtility.HtmlDecode(normalized);
+            normalized = Regex.Replace(normalized, @"\s+", " ").Trim();
+            return normalized;
+        }
+
         private static bool IsMigrationGeneratedHistoryValue(string historyValue)
         {
             if (string.IsNullOrWhiteSpace(historyValue))
@@ -161,7 +178,7 @@ namespace MigrationTools.Processors
 
         private static bool TargetAlreadyContainsHistoryValue(WorkItemData targetWorkItem, string sourceHistoryValue)
         {
-            string normalizedSourceHistory = NormalizeHistoryValue(sourceHistoryValue);
+            string normalizedSourceHistory = NormalizeVisibleHistoryValue(sourceHistoryValue);
             if (string.IsNullOrWhiteSpace(normalizedSourceHistory) || targetWorkItem == null)
             {
                 return false;
@@ -180,7 +197,7 @@ namespace MigrationTools.Processors
                     continue;
                 }
 
-                string targetHistory = NormalizeHistoryValue(targetRevision.Fields["System.History"].Value?.ToString());
+                string targetHistory = NormalizeVisibleHistoryValue(targetRevision.Fields["System.History"].Value?.ToString());
                 if (!string.IsNullOrWhiteSpace(targetHistory) && string.Equals(targetHistory, normalizedSourceHistory, StringComparison.Ordinal))
                 {
                     return true;
@@ -189,7 +206,7 @@ namespace MigrationTools.Processors
 
             if (workItem.Fields.Contains("System.History"))
             {
-                string currentHistory = NormalizeHistoryValue(workItem.Fields["System.History"].Value?.ToString());
+                string currentHistory = NormalizeVisibleHistoryValue(workItem.Fields["System.History"].Value?.ToString());
                 if (!string.IsNullOrWhiteSpace(currentHistory) && string.Equals(currentHistory, normalizedSourceHistory, StringComparison.Ordinal))
                 {
                     return true;
@@ -721,6 +738,42 @@ namespace MigrationTools.Processors
             }
         }
 
+        private async Task SyncCommentsUsingApiAsync(WorkItemData sourceWorkItem, WorkItemData targetWorkItem)
+        {
+            if (!Options.SyncCommentsUsingApi || sourceWorkItem == null || targetWorkItem == null || _commentsTool == null)
+            {
+                return;
+            }
+
+            if (!int.TryParse(sourceWorkItem.Id, out int sourceWorkItemId) || !int.TryParse(targetWorkItem.Id, out int targetWorkItemId))
+            {
+                return;
+            }
+
+            var missingComments = await _commentsTool.GetMissingCommentsAsync(Source, sourceWorkItemId, Target, targetWorkItemId).ConfigureAwait(false);
+            if (missingComments.Count == 0)
+            {
+                TraceWriteLine(LogEventLevel.Information, "Comments API sync found no missing comments for {TargetWorkItemId}",
+                    new Dictionary<string, object>() { { "TargetWorkItemId", targetWorkItem.Id } });
+                return;
+            }
+
+            foreach (var missingComment in missingComments)
+            {
+                string rewrittenComment = missingComment.RawText;
+                rewrittenComment = CommonTools.WorkItemEmbededLink.RewriteHtml(this, rewrittenComment);
+                rewrittenComment = CommonTools.EmbededImages.RewriteHtml(this, targetWorkItem, rewrittenComment);
+                await _commentsTool.PostCommentAsync(Target, targetWorkItemId, rewrittenComment).ConfigureAwait(false);
+            }
+
+            TraceWriteLine(LogEventLevel.Information, "Comments API sync copied {MissingCommentCount} missing comments to {TargetWorkItemId}",
+                new Dictionary<string, object>()
+                {
+                    { "MissingCommentCount", missingComments.Count },
+                    { "TargetWorkItemId", targetWorkItem.Id }
+                });
+        }
+
         private async Task ProcessWorkItemAsync(WorkItemData sourceWorkItem, ProgressTimer progressTimer, int retryLimit = 5, int retries = 0)
         {
             using (var activity = ActivitySourceProvider.ActivitySource.StartActivity("ProcessWorkItemAsync", ActivityKind.Client))
@@ -790,6 +843,7 @@ namespace MigrationTools.Processors
                         }
                         if (targetWorkItem != null)
                         {
+                            await SyncCommentsUsingApiAsync(sourceWorkItem, targetWorkItem).ConfigureAwait(false);
                             targetWorkItem.ToWorkItem().Close();
                         }
                         if (sourceWorkItem != null)
