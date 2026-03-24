@@ -609,7 +609,9 @@ namespace MigrationTools.Processors
                         }
                         if (targetWorkItem != null)
                         {
-                            await SyncMissingCommentsAsync(sourceWorkItem, targetWorkItem);
+                            // SyncMissingCommentsAsync is available but NOT called automatically
+                            // to avoid loops with the revision-based sync. Use the standalone
+                            // BACKFILL_MISSING_COMMENTS.ps1 script for post-incident recovery.
                             targetWorkItem.ToWorkItem().Close();
                         }
                         if (sourceWorkItem != null)
