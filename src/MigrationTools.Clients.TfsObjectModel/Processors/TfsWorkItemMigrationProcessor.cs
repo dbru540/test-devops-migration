@@ -828,11 +828,16 @@ namespace MigrationTools.Processors
                     targetCounts[key] = targetCounts.ContainsKey(key) ? targetCounts[key] + 1 : 1;
                 }
 
-                // Find missing source comments
+                // Find missing source comments (skip synced/backfilled copies to prevent loops)
                 var missing = new List<Newtonsoft.Json.Linq.JToken>();
                 foreach (var sc in sourceComments)
                 {
-                    string key = NormalizeCommentForComparison(sc["text"]?.ToString());
+                    string rawText = sc["text"]?.ToString() ?? "";
+                    // Skip comments that are already synced copies (they have our header)
+                    if (rawText.Contains("[Synced comment -") || rawText.Contains("[BACKFILL -"))
+                        continue;
+
+                    string key = NormalizeCommentForComparison(rawText);
                     if (string.IsNullOrEmpty(key)) continue;
                     if (targetCounts.ContainsKey(key) && targetCounts[key] > 0)
                     {
