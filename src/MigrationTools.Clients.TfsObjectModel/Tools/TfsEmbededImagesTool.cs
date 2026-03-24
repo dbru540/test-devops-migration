@@ -24,7 +24,7 @@ namespace MigrationTools.Tools
     {
         private const string RegexPatternForImageUrl = "(?<=<img.*?src=\")[^\"]*";
         private const string RegexPatternForImageFileName = "(?<=FileName=)[^=]*";
-        private const string TargetDummyWorkItemTitlePrefix = "***** DELETE THIS - Dummy WI - Run:";
+        private const string TargetDummyWorkItemTitle = "***** DELETE THIS - Migration Tool Generated Dummy Work Item For TfsEmbededImagesTool *****";
 
         private Project _targetProject;
 
@@ -66,65 +66,6 @@ namespace MigrationTools.Tools
             }
             
             return 0;
-        }
-
-        public string RewriteHtml(TfsProcessor processor, WorkItemData targetWorkItem, string htmlValue)
-        {
-            if (string.IsNullOrWhiteSpace(htmlValue) || targetWorkItem == null)
-            {
-                return htmlValue;
-            }
-
-            _processor = processor;
-            _targetProject = processor.Target.WorkItems.Project.ToProject();
-
-            string sourceToken = processor.Source.Options.Authentication.AuthenticationMode switch
-            {
-                AuthenticationMode.AccessToken => processor.Source.Options.Authentication.AccessToken,
-                AuthenticationMode.Windows => GetWindowsAuthToken(processor.Source.Options.Authentication.NetworkCredentials),
-                _ => null
-            };
-
-            string targetOrg = ExtractOrganization(processor.Target.Options.Collection.AbsoluteUri);
-            string modifiedValue = htmlValue;
-            string pattern = @"https://dev\.azure\.com/[^/]+/[^""'\s<>]+";
-            MatchCollection matches = Regex.Matches(htmlValue, pattern);
-
-            foreach (Match match in matches)
-            {
-                string imageUrl = WebUtility.HtmlDecode(match.Value);
-                string imageOrg = ExtractOrganization(imageUrl);
-                if (!imageUrl.Contains("/_apis/wit/attachments/") ||
-                    imageOrg.Equals(targetOrg, StringComparison.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
-
-                string cacheKey = $"{imageUrl}→{targetOrg}";
-                string newImageLink = "";
-
-                if (_cachedUploadedUrisBySourceValue.ContainsKey(cacheKey))
-                {
-                    newImageLink = _cachedUploadedUrisBySourceValue[cacheKey];
-                }
-                else
-                {
-                    string downloadToken = DetermineAccessToken(imageUrl, sourceToken);
-                    newImageLink = UploadedAndRetrieveAttachmentLinkUrl(imageUrl, "CommentHtml", targetWorkItem, downloadToken);
-                    if (!string.IsNullOrWhiteSpace(newImageLink))
-                    {
-                        _cachedUploadedUrisBySourceValue[cacheKey] = newImageLink;
-                    }
-                }
-
-                if (!string.IsNullOrWhiteSpace(newImageLink))
-                {
-                    modifiedValue = modifiedValue.Replace(match.Value, newImageLink);
-                    modifiedValue = modifiedValue.Replace(WebUtility.HtmlEncode(match.Value), newImageLink);
-                }
-            }
-
-            return modifiedValue;
         }
 
         private string GetWindowsAuthToken(NetworkCredentials cred)
@@ -638,7 +579,7 @@ namespace MigrationTools.Tools
                 }
             });
 
-            var dummyWi = GetDummyWorkItem(wi, wi.Type);
+            var dummyWi = GetDummyWorkItem(wi.Type);
             var wii = httpClient.UpdateWorkItemAsync(payload, dummyWi.Id, bypassRules: true).GetAwaiter().GetResult();
             if (wii != null)
             {
@@ -659,7 +600,7 @@ namespace MigrationTools.Tools
         private int _DummyWorkItemCount = 0;
         private TfsProcessor _processor;
 
-        private WorkItem GetDummyWorkItem(WorkItem sourceWorkItem, WorkItemType type = null)
+        private WorkItem GetDummyWorkItem(WorkItemType type = null)
         {
             if (_DummyWorkItemCount > 900)
             {
@@ -681,12 +622,7 @@ namespace MigrationTools.Tools
                 }
 
                 _targetDummyWorkItem = type.NewWorkItem();
-                var runId = Environment.GetEnvironmentVariable("BUILD_BUILDID");
-                if (string.IsNullOrWhiteSpace(runId))
-                {
-                    runId = "local";
-                }
-                _targetDummyWorkItem.Title = $"{TargetDummyWorkItemTitlePrefix}{runId} - SourceWI:{sourceWorkItem.Id} *****";
+                _targetDummyWorkItem.Title = TargetDummyWorkItemTitle;
 
                 var fails = _targetDummyWorkItem.Validate();
                 if (fails.Count > 0)
@@ -712,7 +648,8 @@ namespace MigrationTools.Tools
                 }
                 else
                 {
-                    Log.LogInformation("[DUMMY-WI-CREATED:{id}] Dummy workitem created on the target collection.", _targetDummyWorkItem.Id);
+                    Log.LogDebug("TfsEmbededImagesTool: Dummy workitem {id} created on the target collection.", _targetDummyWorkItem.Id);
+                    //_targetProject.Store.DestroyWorkItems(new List<int> { _targetDummyWorkItem.Id });
                 }
             }
             _DummyWorkItemCount++;

@@ -64,13 +64,6 @@ namespace MigrationTools.Processors
         public bool GenerateMigrationComment { get; set; } = true;
 
         /// <summary>
-        /// If enabled, synchronize discussion comments through the Azure DevOps comments API after the work item save path completes.
-        /// This is an opt-in path intended for richer comment fidelity than revision-history-only replay.
-        /// </summary>
-        [JsonProperty(DefaultValueHandling = DefaultValueHandling.Ignore)]
-        public bool SyncCommentsUsingApi { get; set; } = false;
-
-        /// <summary>
         /// A list of work items to import
         /// </summary>
         /// <default>[]</default>

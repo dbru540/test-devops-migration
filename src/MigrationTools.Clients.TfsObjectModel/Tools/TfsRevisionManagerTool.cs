@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
-using System.Text.RegularExpressions;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -25,15 +24,6 @@ namespace MigrationTools.Tools
     /// </summary>
     public class TfsRevisionManagerTool : Tool<TfsRevisionManagerToolOptions>
     {
-        private const string SyncedCommentMarker = "<!-- SYNCED -->";
-        private const string BackfilledCommentMarker = "<!-- BACKFILLED -->";
-        private static readonly Regex LegacySyncedCommentPrefixRegex = new Regex(
-            @"^\s*<b>\[Synced - Comment by .*?\]</b><br\/?>",
-            RegexOptions.Compiled | RegexOptions.IgnoreCase);
-        private static readonly Regex BackfilledCommentPrefixRegex = new Regex(
-            @"^\s*<b>\[BACKFILLED COMMENT - Source rev .*?\]</b><br\/?>",
-            RegexOptions.Compiled | RegexOptions.IgnoreCase);
-
 
         public bool ReplayRevisions => Options.ReplayRevisions;
 
@@ -68,12 +58,6 @@ namespace MigrationTools.Tools
         public List<RevisionItem> GetRevisionsToMigrate(List<RevisionItem> sourceRevisions, List<RevisionItem> targetRevisions)
         {
             EnforceDatesMustBeIncreasing(sourceRevisions);
-            sourceRevisions = sourceRevisions
-                .Where(x => !IsMigrationGeneratedHistoryValue(
-                    x.Fields != null && x.Fields.ContainsKey("System.History")
-                        ? x.Fields["System.History"].Value?.ToString()
-                        : null))
-                .ToList();
 
             LogDebugCurrentSortedRevisions(sourceRevisions, "Source");
             LogDebugCurrentSortedRevisions(targetRevisions, "Target");
@@ -156,68 +140,16 @@ namespace MigrationTools.Tools
                     sourceRevisions = sourceRevisions.Where(x => !targetChangedDates.Contains(x.ChangedDate)).ToList();
                     Log.LogDebug("TfsRevisionManagerTool::GetRevisionsToMigrate::RemoveRevisionsAlreadyOnTarget After removing Date Matches there are {sortedRevisionsCount} left", sourceRevisions.Count);
                 }
-                // Remove source revisions older than target latest date,
-                // BUT keep any that carry System.History (comments) so missed comments can still sync.
+                // Find Max target date and remove all source revisions that are newer
                 var targetLatestDate = targetChangedDates.Max();
-                var olderRevisions = sourceRevisions.Where(x => x.ChangedDate <= targetLatestDate).ToList();
-                var newerRevisions = sourceRevisions.Where(x => x.ChangedDate > targetLatestDate).ToList();
-                var targetHistoryValues = targetRevisions
-                    .Where(x => x.Fields != null && x.Fields.ContainsKey("System.History"))
-                    .Select(x => NormalizeHistoryValue(x.Fields["System.History"].Value?.ToString()))
-                    .Where(x => !string.IsNullOrWhiteSpace(x))
-                    .ToHashSet(StringComparer.Ordinal);
-                var missedComments = olderRevisions.Where(x =>
-                {
-                    if (x.Fields == null || !x.Fields.ContainsKey("System.History"))
-                    {
-                        return false;
-                    }
-
-                    var historyValue = NormalizeHistoryValue(x.Fields["System.History"].Value?.ToString());
-                    return !string.IsNullOrWhiteSpace(historyValue) && !targetHistoryValues.Contains(historyValue);
-                }
-                ).ToList();
-                if (missedComments.Count > 0)
-                {
-                    Log.LogInformation("TfsRevisionManagerTool::RemoveRevisionsAlreadyOnTarget Found {missedCount} older revision(s) with System.History that were not yet on target - keeping them for catch-up", missedComments.Count);
-                }
-                sourceRevisions = missedComments.Concat(newerRevisions).OrderBy(x => x.ChangedDate).ToList();
-                Log.LogDebug("TfsRevisionManagerTool::GetRevisionsToMigrate::RemoveRevisionsAlreadyOnTarget After filtering with comment catch-up there are {sortedRevisionsCount} left", sourceRevisions.Count);
+                sourceRevisions = sourceRevisions.Where(x => x.ChangedDate > targetLatestDate).ToList();
+                Log.LogDebug("TfsRevisionManagerTool::GetRevisionsToMigrate::RemoveRevisionsAlreadyOnTarget After removing revisions before target latest date {targetLatestDate} there are {sortedRevisionsCount} left", targetLatestDate, sourceRevisions.Count);
             }
             else
             {
                 Log.LogDebug("TfsRevisionManagerTool::GetRevisionsToMigrate::RemoveRevisionsAlreadyOnTarget Target is null");
             }
             return sourceRevisions;
-        }
-
-        private static string NormalizeHistoryValue(string historyValue)
-        {
-            if (string.IsNullOrWhiteSpace(historyValue))
-            {
-                return string.Empty;
-            }
-
-            string normalized = historyValue
-                .Replace(SyncedCommentMarker, string.Empty)
-                .Replace(BackfilledCommentMarker, string.Empty)
-                .Trim();
-            normalized = LegacySyncedCommentPrefixRegex.Replace(normalized, string.Empty).Trim();
-            normalized = BackfilledCommentPrefixRegex.Replace(normalized, string.Empty).Trim();
-            return normalized;
-        }
-
-        private static bool IsMigrationGeneratedHistoryValue(string historyValue)
-        {
-            if (string.IsNullOrWhiteSpace(historyValue))
-            {
-                return false;
-            }
-
-            return historyValue.IndexOf(SyncedCommentMarker, StringComparison.Ordinal) >= 0
-                || historyValue.IndexOf(BackfilledCommentMarker, StringComparison.Ordinal) >= 0
-                || LegacySyncedCommentPrefixRegex.IsMatch(historyValue)
-                || BackfilledCommentPrefixRegex.IsMatch(historyValue);
         }
 
         public void AttachSourceRevisionHistoryJsonToTarget(WorkItemData sourceWorkItem, WorkItemData targetWorkItem)

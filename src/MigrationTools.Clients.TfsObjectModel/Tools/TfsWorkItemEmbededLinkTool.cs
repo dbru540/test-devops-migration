@@ -25,7 +25,6 @@ namespace MigrationTools.Tools
         private const string LogTypeName = nameof(TfsWorkItemEmbededLinkTool);
         private const string RegexPatternLinkAnchorTag = "<a[^>].*?(?:href=\"(?<href>[^\"]*)\".*?|(?<version>data-vss-mention=\"[^\"]*\").*?)*>(?<value>.*?)<\\/a?>";
         private const string RegexPatternWorkItemUrl = "http[s]*://.*?/_workitems/edit/(?<id>\\d+)";
-        private const string RegexPatternPlainWorkItemUrl = "https://dev\\.azure\\.com/[^\"'<>]+?/_workitems/edit/(?<id>\\d+)";
         private  Lazy<List<TeamFoundationIdentity>> _targetTeamFoundationIdentitiesLazyCache;
 
         public TfsWorkItemEmbededLinkTool(IOptions<TfsWorkItemEmbededLinkToolOptions> options, IServiceProvider services, ILogger<TfsWorkItemEmbededLinkTool> logger, ITelemetryLogger telemetryLogger)
@@ -62,7 +61,6 @@ namespace MigrationTools.Tools
 
             string oldTfsProject = processor.Source.Options.Project;
             string newTfsProject = processor.Target.Options.Project;
-            string encodedTargetProject = Uri.EscapeDataString(newTfsProject);
 
             Log.LogInformation("{LogTypeName}: Fixing embedded mention links on target work item {targetWorkItemId} from {oldTfsurl} to {newTfsurl}", LogTypeName, targetWorkItem.Id, oldTfsurl, newTfsurl);
 
@@ -100,18 +98,10 @@ namespace MigrationTools.Tools
                                 var linkWI = processor.Target.WorkItems.FindReflectedWorkItemByReflectedWorkItemId(sourceLinkWi);
                                 if (linkWI != null)
                                 {
-                                    bool hasTrailingSlash = href.EndsWith("/", StringComparison.Ordinal);
-                                    string targetUrl = $"{newTfsurl.TrimEnd('/')}/{encodedTargetProject}/_workitems/edit/{linkWI.Id}";
-                                    if (hasTrailingSlash)
-                                    {
-                                        targetUrl += "/";
-                                    }
-
-                                    var replaceValue = Regex.IsMatch(value ?? string.Empty, "^#\\d+$")
-                                        ? $"#{linkWI.Id}"
-                                        : (Regex.IsMatch(value ?? string.Empty, RegexPatternWorkItemUrl)
-                                            ? $"<a href=\"{targetUrl}\">{targetUrl}</a>"
-                                            : targetUrl);
+                                    var replaceValue = anchorTagMatch.Value
+                                        .Replace(workItemId, linkWI.Id)
+                                        .Replace(oldTfsProject, newTfsProject)
+                                        .Replace(oldTfsurl, newTfsurl);
                                     field.Value = field.Value.ToString().Replace(anchorTagMatch.Value, replaceValue);
                                     Log.LogInformation("{LogTypeName}: Source work item {workItemId} mention link was successfully replaced with target work item {linkWIId} mention link on field {fieldName} on target work item {targetWorkItemId}.", LogTypeName, workItemId, linkWI.Id, field.Name, targetWorkItem.Id);
                                 }
@@ -155,122 +145,6 @@ namespace MigrationTools.Tools
             }
 
             return 0;
-        }
-
-        public string RewriteHtml(TfsProcessor processor, string htmlValue)
-        {
-            if (string.IsNullOrWhiteSpace(htmlValue))
-            {
-                return htmlValue;
-            }
-
-            _targetTeamFoundationIdentitiesLazyCache = new Lazy<List<TeamFoundationIdentity>>(() =>
-            {
-                try
-                {
-                    var identityService = processor.Target.GetService<IIdentityManagementService>();
-                    var tfi = identityService.ReadIdentity(IdentitySearchFactor.General, "Project Collection Valid Users", MembershipQuery.Expanded, ReadIdentityOptions.None);
-                    return identityService.ReadIdentities(tfi.Members, MembershipQuery.None, ReadIdentityOptions.None).ToList();
-                }
-                catch (Exception ex)
-                {
-                    Log.LogError(ex, "{LogTypeName}: Unable load list of identities from target collection.", LogTypeName);
-                    Telemetry.TrackException(ex, null);
-                    return new List<TeamFoundationIdentity>();
-                }
-            });
-
-            string oldTfsurl = processor.Source.Options.Collection.ToString();
-            string newTfsurl = processor.Target.Options.Collection.ToString();
-            string oldTfsProject = processor.Source.Options.Project;
-            string newTfsProject = processor.Target.Options.Project;
-            string encodedTargetProject = Uri.EscapeDataString(newTfsProject);
-
-            string rewrittenValue = htmlValue;
-            var anchorTagMatches = Regex.Matches(htmlValue, RegexPatternLinkAnchorTag);
-            foreach (Match anchorTagMatch in anchorTagMatches)
-            {
-                if (!anchorTagMatch.Success) continue;
-
-                var href = anchorTagMatch.Groups["href"].Value;
-                var version = anchorTagMatch.Groups["version"].Value;
-                var value = anchorTagMatch.Groups["value"].Value;
-
-                if (string.IsNullOrWhiteSpace(href) || string.IsNullOrWhiteSpace(value))
-                    continue;
-
-                var workItemLinkMatch = Regex.Match(href, RegexPatternWorkItemUrl);
-                if (workItemLinkMatch.Success)
-                {
-                    var workItemId = workItemLinkMatch.Groups["id"].Value;
-                    var sourceLinkWi = processor.Source.WorkItems.GetWorkItem(workItemId, false);
-                    if (sourceLinkWi != null)
-                    {
-                        var linkWI = processor.Target.WorkItems.FindReflectedWorkItemByReflectedWorkItemId(sourceLinkWi);
-                        if (linkWI != null)
-                        {
-                            bool hasTrailingSlash = href.EndsWith("/", StringComparison.Ordinal);
-                            string targetUrl = $"{newTfsurl.TrimEnd('/')}/{encodedTargetProject}/_workitems/edit/{linkWI.Id}";
-                            if (hasTrailingSlash)
-                            {
-                                targetUrl += "/";
-                            }
-
-                            var replaceValue = Regex.IsMatch(value ?? string.Empty, "^#\\d+$")
-                                ? $"#{linkWI.Id}"
-                                : (Regex.IsMatch(value ?? string.Empty, RegexPatternWorkItemUrl)
-                                    ? $"<a href=\"{targetUrl}\">{targetUrl}</a>"
-                                    : targetUrl);
-                            rewrittenValue = rewrittenValue.Replace(anchorTagMatch.Value, replaceValue);
-                        }
-                        else
-                        {
-                            rewrittenValue = rewrittenValue.Replace(anchorTagMatch.Value, value);
-                        }
-                    }
-                    else
-                    {
-                        rewrittenValue = rewrittenValue.Replace(anchorTagMatch.Value, value);
-                    }
-                }
-                else if (!string.IsNullOrWhiteSpace(version) && (href.StartsWith("mailto:") || href.StartsWith("#")) && value.StartsWith("@"))
-                {
-                    var displayName = value.Substring(1);
-                    var identity = _targetTeamFoundationIdentitiesLazyCache.Value.FirstOrDefault(i => i.DisplayName == displayName);
-                    if (identity != null)
-                    {
-                        var replaceValue = anchorTagMatch.Value.Replace(href, "#").Replace(version, $"data-vss-mention=\"version:2.0,{identity.TeamFoundationId}\"");
-                        rewrittenValue = rewrittenValue.Replace(anchorTagMatch.Value, replaceValue);
-                    }
-                }
-            }
-
-            var plainUrlMatches = Regex.Matches(rewrittenValue, RegexPatternPlainWorkItemUrl);
-            foreach (Match plainUrlMatch in plainUrlMatches)
-            {
-                if (!plainUrlMatch.Success)
-                {
-                    continue;
-                }
-
-                var workItemId = plainUrlMatch.Groups["id"].Value;
-                var sourceLinkWi = processor.Source.WorkItems.GetWorkItem(workItemId, false);
-                if (sourceLinkWi == null)
-                {
-                    continue;
-                }
-
-                var linkWI = processor.Target.WorkItems.FindReflectedWorkItemByReflectedWorkItemId(sourceLinkWi);
-                if (linkWI == null)
-                {
-                    continue;
-                }
-
-                string targetUrl = $"{newTfsurl.TrimEnd('/')}/{encodedTargetProject}/_workitems/edit/{linkWI.Id}";
-                rewrittenValue = rewrittenValue.Replace(plainUrlMatch.Value, targetUrl);
-            }
-
-            return rewrittenValue;
         }
 
 

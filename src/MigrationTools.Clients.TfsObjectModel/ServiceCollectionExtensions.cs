@@ -21,7 +21,6 @@ namespace MigrationTools
             context.AddSingleton<TfsWorkItemLinkTool>().AddMigrationToolsOptions<TfsWorkItemLinkToolOptions>(configuration);
             context.AddSingleton<TfsWorkItemEmbededLinkTool>().AddMigrationToolsOptions<TfsWorkItemEmbededLinkToolOptions>(configuration);
             context.AddSingleton<TfsEmbededImagesTool>().AddMigrationToolsOptions<TfsEmbededImagesToolOptions>(configuration);
-            context.AddSingleton<TfsWorkItemCommentsTool>().AddMigrationToolsOptions<TfsWorkItemCommentsToolOptions>(configuration);
             context.AddSingleton<TfsGitRepositoryTool>().AddMigrationToolsOptions<TfsGitRepositoryToolOptions>(configuration);
             context.AddSingleton<TfsNodeStructureTool>().AddMigrationToolsOptions<TfsNodeStructureToolOptions, TfsNodeStructureToolOptionsValidator>(configuration);
             context.AddSingleton<TfsRevisionManagerTool>().AddMigrationToolsOptions<TfsRevisionManagerToolOptions>(configuration);
