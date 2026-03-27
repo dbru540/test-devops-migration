@@ -82,6 +82,11 @@ namespace MigrationTools.Processors
         private ILogger workItemLog;
         private List<string> _itemsInError;
 
+        // Loop detection: track API comment sync frequency per WI pair
+        private static readonly Dictionary<string, (int count, DateTime firstSeen)> _apiSyncTracker =
+            new Dictionary<string, (int, DateTime)>();
+        private static readonly object _trackerLock = new object();
+
         public WorkItemMetrics workItemMetrics { get; private set; }
 
         public TfsWorkItemMigrationProcessor(
@@ -960,6 +965,14 @@ namespace MigrationTools.Processors
                     return;
                 }
 
+                // Loop detection: block sync if >5 API syncs in 10 min for this WI pair
+                if (IsLoopDetected(sourceId, targetId))
+                {
+                    TraceWriteLine(LogEventLevel.Error, "Comment sync BLOCKED for {SourceId} -> {TargetId}: loop detected",
+                        new Dictionary<string, object>() { { "SourceId", sourceId }, { "TargetId", targetId } });
+                    return;
+                }
+
                 // Post missing comments in chronological order (API returns newest first)
                 missing.Reverse();
                 foreach (var comment in missing)
@@ -1143,6 +1156,51 @@ namespace MigrationTools.Processors
                     response.EnsureSuccessStatusCode();
                 }
             }
+        }
+
+        /// <summary>
+        /// Returns true if a loop is detected (>5 API syncs in 10 minutes for the same WI pair).
+        /// When detected, posts a LOOP ALERT and blocks further sync.
+        /// </summary>
+        private bool IsLoopDetected(int sourceWorkItemId, int targetWorkItemId)
+        {
+            string key = $"{sourceWorkItemId}->{targetWorkItemId}";
+            lock (_trackerLock)
+            {
+                DateTime now = DateTime.UtcNow;
+                if (_apiSyncTracker.TryGetValue(key, out var entry))
+                {
+                    if ((now - entry.firstSeen).TotalMinutes <= 10)
+                    {
+                        int newCount = entry.count + 1;
+                        _apiSyncTracker[key] = (newCount, entry.firstSeen);
+                        if (newCount > 5)
+                        {
+                            TraceWriteLine(LogEventLevel.Error, "LOOP DETECTED: {Count} API syncs in {Minutes:F1} min for {SourceId} -> {TargetId}",
+                                new Dictionary<string, object>() {
+                                    { "Count", newCount },
+                                    { "Minutes", (now - entry.firstSeen).TotalMinutes },
+                                    { "SourceId", sourceWorkItemId },
+                                    { "TargetId", targetWorkItemId }
+                                });
+                            PostAlertToMonitoringWI(
+                                $"LOOP DETECTED: {newCount} API syncs in {(now - entry.firstSeen).TotalMinutes:F0} min — sync BLOCKED",
+                                sourceWorkItemId, targetWorkItemId, newCount);
+                            return true;
+                        }
+                    }
+                    else
+                    {
+                        // Window expired, reset
+                        _apiSyncTracker[key] = (1, now);
+                    }
+                }
+                else
+                {
+                    _apiSyncTracker[key] = (1, now);
+                }
+            }
+            return false;
         }
 
         private void PostAlertToMonitoringWI(string action, int sourceWorkItemId, int targetWorkItemId, int commentCount)
