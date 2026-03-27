@@ -1017,6 +1017,14 @@ namespace MigrationTools.Processors
                 int totalActions = missing.Count + modified.Count;
                 TraceWriteLine(LogEventLevel.Information, "Comment sync: {MissingCount} posted, {ModifiedCount} updated on {TargetWorkItemId}",
                     new Dictionary<string, object>() { { "MissingCount", missing.Count }, { "ModifiedCount", modified.Count }, { "TargetWorkItemId", targetWorkItem.Id } });
+
+                if (totalActions > 0)
+                {
+                    string alertAction = missing.Count > 0 && modified.Count > 0
+                        ? $"Posted {missing.Count} + Updated {modified.Count}"
+                        : missing.Count > 0 ? $"Posted {missing.Count}" : $"Updated {modified.Count}";
+                    PostAlertToMonitoringWI(alertAction, sourceId, targetId, totalActions);
+                }
             }
             catch (Exception ex)
             {
@@ -1134,6 +1142,60 @@ namespace MigrationTools.Processors
                     var response = await client.SendAsync(request);
                     response.EnsureSuccessStatusCode();
                 }
+            }
+        }
+
+        private void PostAlertToMonitoringWI(string action, int sourceWorkItemId, int targetWorkItemId, int commentCount)
+        {
+            // Alert via @mention on a monitoring WI. Configured via env vars:
+            // ALERT_ORG, ALERT_PROJECT, ALERT_WI_ID, ALERT_PAT, ALERT_MENTION_GUID, ALERT_MENTION_NAME
+            string alertOrg = Environment.GetEnvironmentVariable("ALERT_ORG");
+            string alertProject = Environment.GetEnvironmentVariable("ALERT_PROJECT");
+            string alertWiId = Environment.GetEnvironmentVariable("ALERT_WI_ID");
+            string alertPat = Environment.GetEnvironmentVariable("ALERT_PAT");
+            string mentionGuid = Environment.GetEnvironmentVariable("ALERT_MENTION_GUID");
+            string mentionName = Environment.GetEnvironmentVariable("ALERT_MENTION_NAME");
+
+            if (string.IsNullOrEmpty(alertOrg) || string.IsNullOrEmpty(alertWiId) || string.IsNullOrEmpty(alertPat))
+                return;
+
+            try
+            {
+                string sourceOrg = GetSourceOrgName();
+                string targetOrg = Target.Options.Collection.AbsoluteUri.TrimEnd('/');
+                string mention = !string.IsNullOrEmpty(mentionGuid)
+                    ? $"<a href=\"#\" data-vss-mention=\"version:2.0,{mentionGuid}\">@{WebUtility.HtmlEncode(mentionName ?? "Alert")}</a> "
+                    : "";
+
+                string commentText = $"{mention}<b>[SYNC ALERT]</b> {action}: " +
+                    $"<b>{commentCount}</b> comment(s) synced via API from " +
+                    $"<b>{sourceOrg} WI#{sourceWorkItemId}</b> to " +
+                    $"<b>{targetOrg} WI#{targetWorkItemId}</b> " +
+                    $"at {DateTime.UtcNow:yyyy-MM-dd HH:mm} UTC";
+
+                string requestUri = $"https://dev.azure.com/{alertOrg}/{Uri.EscapeDataString(alertProject ?? alertOrg)}/_apis/wit/workitems/{alertWiId}?api-version=7.0";
+                var patchOps = new Newtonsoft.Json.Linq.JArray();
+                patchOps.Add(new Newtonsoft.Json.Linq.JObject
+                {
+                    ["op"] = "add",
+                    ["path"] = "/fields/System.History",
+                    ["value"] = commentText
+                });
+
+                using (var client = new HttpClient())
+                {
+                    client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
+                        "Basic", Convert.ToBase64String(Encoding.ASCII.GetBytes($":{alertPat}")));
+                    using (var content = new StringContent(patchOps.ToString(), Encoding.UTF8, "application/json-patch+json"))
+                    {
+                        var request = new HttpRequestMessage(new HttpMethod("PATCH"), requestUri) { Content = content };
+                        client.SendAsync(request).GetAwaiter().GetResult();
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.LogWarning("Failed to post alert to monitoring WI: {Error}", ex.Message);
             }
         }
 
