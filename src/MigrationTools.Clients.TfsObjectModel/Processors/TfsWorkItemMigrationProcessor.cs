@@ -12,6 +12,8 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Microsoft.TeamFoundation.Common;
+using Microsoft.TeamFoundation.Framework.Client;
+using Microsoft.TeamFoundation.Framework.Common;
 using Microsoft.TeamFoundation.WorkItemTracking.Client;
 using Microsoft.TeamFoundation.WorkItemTracking.WebApi;
 using Microsoft.VisualStudio.Services.Common;
@@ -74,6 +76,7 @@ namespace MigrationTools.Processors
         private static int _totalWorkItem = 0;
         private static string workItemLogTemplate = "[{sourceWorkItemTypeName,20}][Complete:{currentWorkItem,6}/{totalWorkItems}][sid:{sourceWorkItemId,6}|Rev:{sourceRevisionInt,3}][tid:{targetWorkItemId,6} | ";
         private List<string> _ignore;
+        private Lazy<List<Microsoft.TeamFoundation.Framework.Client.TeamFoundationIdentity>> _targetIdentitiesCache;
 
         private ILogger contextLog;
         private ILogger workItemLog;
@@ -122,6 +125,21 @@ namespace MigrationTools.Processors
             //////////////////////////////////////////////////
             ValidatePatTokenRequirement();
             //////////////////////////////////////////////////
+
+            _targetIdentitiesCache = new Lazy<List<Microsoft.TeamFoundation.Framework.Client.TeamFoundationIdentity>>(() =>
+            {
+                try
+                {
+                    var identityService = Target.GetService<IIdentityManagementService>();
+                    var tfi = identityService.ReadIdentity(IdentitySearchFactor.General, "Project Collection Valid Users", MembershipQuery.Expanded, ReadIdentityOptions.None);
+                    return identityService.ReadIdentities(tfi.Members, MembershipQuery.None, ReadIdentityOptions.None).ToList();
+                }
+                catch (Exception ex)
+                {
+                    Log.LogError(ex, "Unable to load identities from target collection for comment mention rewriting.");
+                    return new List<Microsoft.TeamFoundation.Framework.Client.TeamFoundationIdentity>();
+                }
+            });
 
             ValidateWorkItemTypes();
 
@@ -735,6 +753,41 @@ namespace MigrationTools.Processors
             return null;
         }
 
+        private static readonly System.Text.RegularExpressions.Regex MentionAnchorRegex =
+            new System.Text.RegularExpressions.Regex(
+                @"<a[^>]*?(?:href=""(?<href>[^""]*)""|(?<version>data-vss-mention=""[^""]*""))[^>]*>(?<value>.*?)</a>",
+                System.Text.RegularExpressions.RegexOptions.Compiled | System.Text.RegularExpressions.RegexOptions.Singleline);
+
+        private string RewriteCommentMentions(string commentHtml)
+        {
+            if (string.IsNullOrWhiteSpace(commentHtml) || _targetIdentitiesCache == null) return commentHtml;
+
+            return MentionAnchorRegex.Replace(commentHtml, match =>
+            {
+                var href = match.Groups["href"].Value;
+                var version = match.Groups["version"].Value;
+                var value = match.Groups["value"].Value;
+
+                if (string.IsNullOrWhiteSpace(version) || string.IsNullOrWhiteSpace(value))
+                    return match.Value;
+
+                // Only process user mentions (@DisplayName with href=# or mailto:)
+                if (!(href.StartsWith("#") || href.StartsWith("mailto:")) || !value.StartsWith("@"))
+                    return match.Value;
+
+                var displayName = value.Substring(1);
+                var identity = _targetIdentitiesCache.Value.FirstOrDefault(i => i.DisplayName == displayName);
+                if (identity != null)
+                {
+                    return match.Value
+                        .Replace(href, "#")
+                        .Replace(version, $"data-vss-mention=\"version:2.0,{identity.TeamFoundationId}\"");
+                }
+
+                return match.Value;
+            });
+        }
+
         private string RewriteCommentWorkItemLinks(string commentHtml)
         {
             if (string.IsNullOrWhiteSpace(commentHtml)) return commentHtml;
@@ -776,30 +829,6 @@ namespace MigrationTools.Processors
             return commentHtml;
         }
 
-        private static string NormalizeCommentForComparison(string text)
-        {
-            if (string.IsNullOrWhiteSpace(text)) return string.Empty;
-            // Strip synced/backfill headers
-            string n = System.Text.RegularExpressions.Regex.Replace(text,
-                @"<b>\[Synced comment -.*?\]</b><br/?>", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-            n = System.Text.RegularExpressions.Regex.Replace(n,
-                @"<b>\[BACKFILL -.*?\]</b><br/?>", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-            // Strip mention widgets (contain org-specific WI IDs that differ between source/target)
-            n = System.Text.RegularExpressions.Regex.Replace(n,
-                @"<!--MentionBegin-->.*?<!--MentionEnd-->", " [WI-REF] ", System.Text.RegularExpressions.RegexOptions.Singleline);
-            // Normalize WI URLs to just [WI-REF] (IDs differ between orgs)
-            n = System.Text.RegularExpressions.Regex.Replace(n,
-                @"https?://dev\.azure\.com/[^""'\s]+/_workitems/edit/\d+", "[WI-REF]");
-            // Normalize attachment URLs (GUIDs differ between orgs)
-            n = System.Text.RegularExpressions.Regex.Replace(n,
-                @"https?://dev\.azure\.com/[^""'\s]+/_apis/wit/attachments/[^""'\s]+", "[IMG-REF]");
-            // Strip HTML tags
-            n = System.Text.RegularExpressions.Regex.Replace(n, "<[^>]+>", " ");
-            n = WebUtility.HtmlDecode(n);
-            n = System.Text.RegularExpressions.Regex.Replace(n, @"\s+", " ").Trim();
-            return n;
-        }
-
         private Newtonsoft.Json.Linq.JArray GetCommentsViaApi(string baseUri, string project, string token, int workItemId)
         {
             string requestUri = $"{baseUri.TrimEnd('/')}/{Uri.EscapeDataString(project)}/_apis/wit/workItems/{workItemId}/comments?api-version=7.1-preview.4&$top=200";
@@ -813,6 +842,43 @@ namespace MigrationTools.Processors
             }
         }
 
+        private string GetSourceOrgName()
+        {
+            Uri uri = Source.Options.Collection;
+            if (uri.Host.Contains("dev.azure.com") && uri.Segments.Length > 1)
+                return uri.Segments[1].Trim('/');
+            if (uri.Host.Contains("visualstudio.com"))
+                return uri.Host.Split('.')[0];
+            return uri.Host;
+        }
+
+        private static readonly System.Text.RegularExpressions.Regex SyncSrcMarkerRegex =
+            new System.Text.RegularExpressions.Regex(
+                @"<!--\s*sync-src:([^:]+):(\d+)\s*-->",
+                System.Text.RegularExpressions.RegexOptions.Compiled);
+
+        // Comments created before this date are considered already synced (or out of scope).
+        // Read from COMMENT_SYNC_CUTOFF file (path in env var) or env var value, fallback hardcoded.
+        private static readonly DateTime CommentSyncCutoffDate = ParseCutoffDate();
+
+        private static DateTime ParseCutoffDate()
+        {
+            // 1. Try file path from env var
+            string filePath = Environment.GetEnvironmentVariable("COMMENT_SYNC_CUTOFF_FILE");
+            if (!string.IsNullOrEmpty(filePath) && System.IO.File.Exists(filePath))
+            {
+                string content = System.IO.File.ReadAllText(filePath).Trim();
+                if (DateTime.TryParse(content, null, System.Globalization.DateTimeStyles.RoundtripKind, out DateTime fromFile))
+                    return fromFile.ToUniversalTime();
+            }
+            // 2. Try direct value from env var
+            string env = Environment.GetEnvironmentVariable("COMMENT_SYNC_CUTOFF");
+            if (!string.IsNullOrEmpty(env) && DateTime.TryParse(env, null, System.Globalization.DateTimeStyles.RoundtripKind, out DateTime parsed))
+                return parsed.ToUniversalTime();
+            // 3. Hardcoded fallback
+            return new DateTime(2026, 3, 27, 16, 0, 0, DateTimeKind.Utc);
+        }
+
         private async Task SyncMissingCommentsAsync(WorkItemData sourceWorkItem, WorkItemData targetWorkItem)
         {
             if (sourceWorkItem == null || targetWorkItem == null) return;
@@ -820,6 +886,8 @@ namespace MigrationTools.Processors
 
             try
             {
+                string sourceOrg = GetSourceOrgName();
+
                 var sourceComments = GetCommentsViaApi(
                     Source.Options.Collection.AbsoluteUri, Source.Options.Project,
                     Source.Options.Authentication.AccessToken, sourceId);
@@ -827,44 +895,65 @@ namespace MigrationTools.Processors
                     Target.Options.Collection.AbsoluteUri, Target.Options.Project,
                     Target.Options.Authentication.AccessToken, targetId);
 
-                // Build target lookup by normalized content with counts
-                var targetCounts = new Dictionary<string, int>(StringComparer.Ordinal);
+                // Pass 1: Build map of already-synced source comment IDs → target comment
+                var syncedMap = new Dictionary<string, Newtonsoft.Json.Linq.JToken>(StringComparer.OrdinalIgnoreCase);
                 foreach (var tc in targetComments)
                 {
-                    string key = NormalizeCommentForComparison(tc["text"]?.ToString());
-                    if (string.IsNullOrEmpty(key)) continue;
-                    targetCounts[key] = targetCounts.ContainsKey(key) ? targetCounts[key] + 1 : 1;
+                    string tcText = tc["text"]?.ToString() ?? "";
+                    var markerMatch = SyncSrcMarkerRegex.Match(tcText);
+                    if (markerMatch.Success && markerMatch.Groups[1].Value.Equals(sourceOrg, StringComparison.OrdinalIgnoreCase))
+                    {
+                        syncedMap[markerMatch.Groups[2].Value] = tc;
+                    }
                 }
 
-                // Find missing source comments (skip synced/backfilled copies to prevent loops)
-                // Determine sync service account names to skip their comments (they are copies, not originals)
-                string sourceSyncAccount = Source.Options.Authentication.AccessToken != null ? "svc" : "";
+                // Find missing and modified source comments (marker-based only)
                 var missing = new List<Newtonsoft.Json.Linq.JToken>();
+                var modified = new List<(Newtonsoft.Json.Linq.JToken source, Newtonsoft.Json.Linq.JToken target)>();
                 foreach (var sc in sourceComments)
                 {
                     string rawText = sc["text"]?.ToString() ?? "";
                     string commentAuthor = sc["createdBy"]?["displayName"]?.ToString() ?? "";
-                    // Skip comments created by the sync service account (always copies)
-                    if (commentAuthor.IndexOf("svc", StringComparison.OrdinalIgnoreCase) >= 0 &&
-                        commentAuthor.IndexOf("msflow", StringComparison.OrdinalIgnoreCase) >= 0)
-                        continue;
-                    // Also skip by content header as fallback
-                    if (rawText.Contains("[Synced comment -") || rawText.Contains("[BACKFILL -"))
+                    string commentId = sc["id"]?.ToString() ?? "";
+
+                    // Cutoff: ignore comments created before marker-based sync was deployed
+                    string createdDateStr = sc["createdDate"]?.ToString();
+                    if (DateTime.TryParse(createdDateStr, null, System.Globalization.DateTimeStyles.RoundtripKind, out DateTime createdDate)
+                        && createdDate < CommentSyncCutoffDate)
                         continue;
 
-                    string key = NormalizeCommentForComparison(rawText);
-                    if (string.IsNullOrEmpty(key)) continue;
-                    if (targetCounts.ContainsKey(key) && targetCounts[key] > 0)
+                    // Anti-loop: skip comments created by sync service accounts
+                    string commentAuthorUniqueName = sc["createdBy"]?["uniqueName"]?.ToString() ?? "";
+                    bool isSyncAccount =
+                        commentAuthorUniqueName.Equals("svc-msflow@fiveforty.fr", StringComparison.OrdinalIgnoreCase) ||
+                        commentAuthorUniqueName.Equals("svc-d365-devops@cityzmedia.fr", StringComparison.OrdinalIgnoreCase) ||
+                        commentAuthorUniqueName.Equals("admin-d365@christofle.com", StringComparison.OrdinalIgnoreCase) ||
+                        commentAuthor.IndexOf("Migration", StringComparison.OrdinalIgnoreCase) >= 0;
+                    if (isSyncAccount)
+                        continue;
+                    // Anti-loop: skip comments that are themselves synced copies
+                    if (rawText.Contains("<!-- sync-src:"))
+                        continue;
+
+                    // Marker-based match: check if already synced
+                    if (!string.IsNullOrEmpty(commentId) && syncedMap.TryGetValue(commentId, out var targetCopy))
                     {
-                        targetCounts[key]--;
+                        // Check if source was modified after the target copy was created
+                        string srcModifiedStr = sc["modifiedDate"]?.ToString();
+                        string tgtCreatedStr = targetCopy["createdDate"]?.ToString();
+                        if (DateTime.TryParse(srcModifiedStr, null, System.Globalization.DateTimeStyles.RoundtripKind, out DateTime srcModified)
+                            && DateTime.TryParse(tgtCreatedStr, null, System.Globalization.DateTimeStyles.RoundtripKind, out DateTime tgtCreated)
+                            && srcModified > tgtCreated)
+                        {
+                            modified.Add((sc, targetCopy));
+                        }
+                        continue;
                     }
-                    else
-                    {
-                        missing.Add(sc);
-                    }
+
+                    missing.Add(sc);
                 }
 
-                if (missing.Count == 0)
+                if (missing.Count == 0 && modified.Count == 0)
                 {
                     TraceWriteLine(LogEventLevel.Debug, "Comment sync: all {SourceCount} source comments found on target {TargetWorkItemId}",
                         new Dictionary<string, object>() { { "SourceCount", sourceComments.Count }, { "TargetWorkItemId", targetWorkItem.Id } });
@@ -875,17 +964,59 @@ namespace MigrationTools.Processors
                 missing.Reverse();
                 foreach (var comment in missing)
                 {
-                    string author = comment["createdBy"]?["displayName"]?.ToString() ?? "Unknown";
-                    string date = comment["createdDate"]?.ToString() ?? "Unknown";
+                    string commentId = comment["id"]?.ToString() ?? "";
+                    string commentAuthorDisplay = comment["createdBy"]?["displayName"]?.ToString();
+                    string commentAuthorEmail = comment["createdBy"]?["uniqueName"]?.ToString();
                     string originalText = comment["text"]?.ToString() ?? "";
                     originalText = RewriteCommentImagesForTarget(originalText, targetId);
                     originalText = RewriteCommentWorkItemLinks(originalText);
-                    string headerHtml = $"<b>[Synced comment - Original author: {WebUtility.HtmlEncode(author)} - Date: {date}]</b><br/>";
-                    PostCommentViaApi(targetId, headerHtml + originalText);
+                    originalText = RewriteCommentMentions(originalText);
+                    string marker = $"<!-- sync-src:{WebUtility.HtmlEncode(sourceOrg)}:{commentId} -->";
+
+                    // Add original date header (API path can't preserve the original timestamp)
+                    string originalDateStr = comment["createdDate"]?.ToString();
+                    string dateHeader = "";
+                    if (DateTime.TryParse(originalDateStr, null, System.Globalization.DateTimeStyles.RoundtripKind, out DateTime originalDate))
+                    {
+                        dateHeader = $"<b>[Original date: {originalDate.ToLocalTime():yyyy-MM-dd HH:mm}]</b><br>";
+                    }
+
+                    // Build author identity string for impersonation via bypassRules
+                    string authorIdentity = null;
+                    if (!string.IsNullOrWhiteSpace(commentAuthorDisplay))
+                    {
+                        authorIdentity = !string.IsNullOrWhiteSpace(commentAuthorEmail)
+                            ? $"{commentAuthorDisplay} <{commentAuthorEmail}>"
+                            : commentAuthorDisplay;
+                    }
+
+                    await PostCommentViaApiAsync(targetId, marker + dateHeader + originalText, authorIdentity);
                 }
 
-                TraceWriteLine(LogEventLevel.Information, "Comment sync: posted {MissingCount} missing comments to {TargetWorkItemId}",
-                    new Dictionary<string, object>() { { "MissingCount", missing.Count }, { "TargetWorkItemId", targetWorkItem.Id } });
+                // Update modified comments on target
+                foreach (var (source, target) in modified)
+                {
+                    string commentId = source["id"]?.ToString() ?? "";
+                    string targetCommentId = target["id"]?.ToString() ?? "";
+                    string updatedText = source["text"]?.ToString() ?? "";
+                    updatedText = RewriteCommentImagesForTarget(updatedText, targetId);
+                    updatedText = RewriteCommentWorkItemLinks(updatedText);
+                    updatedText = RewriteCommentMentions(updatedText);
+                    string marker = $"<!-- sync-src:{WebUtility.HtmlEncode(sourceOrg)}:{commentId} -->";
+
+                    string originalDateStr = source["createdDate"]?.ToString();
+                    string dateHeader = "";
+                    if (DateTime.TryParse(originalDateStr, null, System.Globalization.DateTimeStyles.RoundtripKind, out DateTime originalDate))
+                    {
+                        dateHeader = $"<b>[Original date: {originalDate.ToLocalTime():yyyy-MM-dd HH:mm}]</b><br>";
+                    }
+
+                    await UpdateCommentViaApiAsync(targetId, int.Parse(targetCommentId), marker + dateHeader + updatedText);
+                }
+
+                int totalActions = missing.Count + modified.Count;
+                TraceWriteLine(LogEventLevel.Information, "Comment sync: {MissingCount} posted, {ModifiedCount} updated on {TargetWorkItemId}",
+                    new Dictionary<string, object>() { { "MissingCount", missing.Count }, { "ModifiedCount", modified.Count }, { "TargetWorkItemId", targetWorkItem.Id } });
             }
             catch (Exception ex)
             {
@@ -964,21 +1095,66 @@ namespace MigrationTools.Processors
             return commentHtml;
         }
 
-        private void PostCommentViaApi(int targetWorkItemId, string commentHtml)
+        private async Task PostCommentViaApiAsync(int targetWorkItemId, string commentHtml, string originalAuthor = null)
         {
             string project = Uri.EscapeDataString(Target.Options.Project);
             string baseUri = Target.Options.Collection.AbsoluteUri.TrimEnd('/');
-            string requestUri = $"{baseUri}/{project}/_apis/wit/workItems/{targetWorkItemId}/comments?api-version=7.1-preview.4";
             string token = Target.Options.Authentication.AccessToken;
+
+            // Use Work Item PATCH API with bypassRules to impersonate the original author
+            string requestUri = $"{baseUri}/{project}/_apis/wit/workitems/{targetWorkItemId}?bypassRules=true&api-version=7.0";
+            Log.LogInformation("PostCommentViaApiAsync: PATCH {RequestUri} with bypassRules, author={Author}", requestUri, originalAuthor ?? "(none)");
+
+            var patchOps = new Newtonsoft.Json.Linq.JArray();
+            patchOps.Add(new Newtonsoft.Json.Linq.JObject
+            {
+                ["op"] = "add",
+                ["path"] = "/fields/System.History",
+                ["value"] = commentHtml
+            });
+
+            if (!string.IsNullOrWhiteSpace(originalAuthor))
+            {
+                patchOps.Add(new Newtonsoft.Json.Linq.JObject
+                {
+                    ["op"] = "add",
+                    ["path"] = "/fields/System.ChangedBy",
+                    ["value"] = originalAuthor
+                });
+            }
 
             using (var client = new HttpClient())
             {
                 client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
                     "Basic", Convert.ToBase64String(Encoding.ASCII.GetBytes($":{token}")));
-                var payload = new Newtonsoft.Json.Linq.JObject { ["text"] = commentHtml };
-                using (var content = new StringContent(payload.ToString(), Encoding.UTF8, "application/json"))
-                using (var response = client.PostAsync(requestUri, content).Result)
+                using (var content = new StringContent(patchOps.ToString(), Encoding.UTF8, "application/json-patch+json"))
                 {
+                    // Explicit PATCH method — HttpClient.PatchAsync may not exist on net472
+                    var request = new HttpRequestMessage(new HttpMethod("PATCH"), requestUri) { Content = content };
+                    var response = await client.SendAsync(request);
+                    response.EnsureSuccessStatusCode();
+                }
+            }
+        }
+
+        private async Task UpdateCommentViaApiAsync(int targetWorkItemId, int targetCommentId, string commentHtml)
+        {
+            string project = Uri.EscapeDataString(Target.Options.Project);
+            string baseUri = Target.Options.Collection.AbsoluteUri.TrimEnd('/');
+            string token = Target.Options.Authentication.AccessToken;
+
+            string requestUri = $"{baseUri}/{project}/_apis/wit/workItems/{targetWorkItemId}/comments/{targetCommentId}?api-version=7.1-preview.4";
+            Log.LogInformation("UpdateCommentViaApiAsync: PATCH comment {CommentId} on WI {WorkItemId}", targetCommentId, targetWorkItemId);
+
+            var body = new Newtonsoft.Json.Linq.JObject { ["text"] = commentHtml };
+            using (var client = new HttpClient())
+            {
+                client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
+                    "Basic", Convert.ToBase64String(Encoding.ASCII.GetBytes($":{token}")));
+                using (var content = new StringContent(body.ToString(), Encoding.UTF8, "application/json"))
+                {
+                    var request = new HttpRequestMessage(new HttpMethod("PATCH"), requestUri) { Content = content };
+                    var response = await client.SendAsync(request);
                     response.EnsureSuccessStatusCode();
                 }
             }
@@ -989,7 +1165,12 @@ namespace MigrationTools.Processors
             try
             {
                 targetWorkItem.SaveToAzureDevOps();
-                lastSavedDate = (DateTime)targetWorkItem.ToWorkItem().Fields["System.ChangedDate"].Value;
+                // Use the historical date we SET on the revision, not what the server returned.
+                // After a bypassRules save the server honours the historical date on the revision
+                // but the SOAP WorkItem object may report the server clock as System.ChangedDate.
+                // Using the server clock would make lastSavedDate jump ahead of subsequent
+                // source revision dates, triggering false VS402625 bumps on the next iteration.
+                lastSavedDate = revision.ChangedDate;
                 return true;
             }
             catch (Exception ex) when (ex.ToString().Contains("VS402625") || ex.ToString().Contains("VS402624"))
@@ -1011,7 +1192,7 @@ namespace MigrationTools.Processors
                 try
                 {
                     targetWorkItem.SaveToAzureDevOps();
-                    lastSavedDate = (DateTime)targetWorkItem.ToWorkItem().Fields["System.ChangedDate"].Value;
+                    lastSavedDate = revision.ChangedDate;
                 }
                 catch
                 {
@@ -1019,10 +1200,10 @@ namespace MigrationTools.Processors
                     return false;
                 }
 
-                // Post comment via REST API with original author/date header
+                // Post comment via REST API (VS402625 fallback — revision replay failed)
                 int targetId = int.Parse(targetWorkItem.Id);
-                string headerHtml = $"<b>[Synced comment - Original author: {WebUtility.HtmlEncode(author)} - Date: {originalDate:yyyy-MM-dd HH:mm:ss} UTC]</b><br/>";
-                PostCommentViaApi(targetId, headerHtml + commentText);
+                string dateHeader = $"<b>[Original date: {originalDate.ToLocalTime():yyyy-MM-dd HH:mm}]</b><br>";
+                PostCommentViaApiAsync(targetId, dateHeader + commentText, author).GetAwaiter().GetResult();
 
                 TraceWriteLine(LogEventLevel.Warning,
                     "VS402625 on revision {RevisionNumber}: comment posted via API fallback for TargetWorkItem {TargetWorkItemId}",
@@ -1061,8 +1242,11 @@ namespace MigrationTools.Processors
                     CommonTools.RevisionManager.AttachSourceRevisionHistoryJsonToTarget(sourceWorkItem, targetWorkItem);
                 }
 
-                // Track last persisted date to ensure strictly increasing dates (VS402625 fix).
-                // We cannot rely on the in-memory field value because the server may stamp a different date.
+                // Track the historical date we SET on each revision (not the server's response).
+                // After a bypassRules save, the server honours the historical ChangedDate on
+                // the revision but the SOAP WorkItem object may report the server clock instead.
+                // Using the server clock would make lastSavedDate jump ahead of subsequent
+                // source revision dates, causing false VS402625 bumps.
                 DateTime lastSavedDate = targetWorkItem?.ToWorkItem()?.Fields["System.ChangedDate"]?.Value is DateTime d ? d : DateTime.MinValue;
 
                 foreach (var revision in revisionsToMigrate)
@@ -1081,7 +1265,8 @@ namespace MigrationTools.Processors
                          revChangedBy.IndexOf("msflow", StringComparison.OrdinalIgnoreCase) >= 0) ||
                         revChangedBy.Equals("Migration", StringComparison.OrdinalIgnoreCase) ||
                         revHistory.Contains("[Synced comment -") ||
-                        revHistory.Contains("[BACKFILL -");
+                        revHistory.Contains("[BACKFILL -") ||
+                        revHistory.Contains("<!-- sync-src:");
                     if (isSyncGenerated)
                     {
                         TraceWriteLine(LogEventLevel.Information, " Skipping sync-generated revision [{RevisionNumber}] (ChangedBy: {ChangedBy})",
@@ -1170,7 +1355,7 @@ namespace MigrationTools.Processors
                         );
                         var result = workItemTrackingClient.UpdateWorkItemAsync(patchDocument, workItemId, bypassRules: true).Result;
                         targetWorkItem = Target.WorkItems.GetWorkItem(workItemId);
-                        lastSavedDate = (DateTime)targetWorkItem.ToWorkItem().Fields["System.ChangedDate"].Value;
+                        lastSavedDate = typeChangeDate;
                     }
                     PopulateWorkItem(currentRevisionWorkItem, targetWorkItem, destType);
 
@@ -1190,8 +1375,10 @@ namespace MigrationTools.Processors
                         }
                     }
                     // Impersonate revision author.
-                    // Ensure revision date is strictly after last persisted date (VS402625 fix).
-                    // Use lastSavedDate (not in-memory field) and bump by 1s (not 1ms) for server precision.
+                    // Ensure revision date is strictly after the historical date we set on the
+                    // previous revision (VS402625 fix). lastSavedDate tracks what we SET, not
+                    // what the server clock was, so the bump only triggers when source dates
+                    // genuinely collide — not because the server save took wall-clock time.
                     // Also clamp to not exceed current time (VS402624 fix).
                     if (revision.ChangedDate <= lastSavedDate)
                     {
