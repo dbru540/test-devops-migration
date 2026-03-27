@@ -857,7 +857,7 @@ namespace MigrationTools.Processors
                 System.Text.RegularExpressions.RegexOptions.Compiled);
 
         // Comments created before this date are considered already synced (or out of scope).
-        // Read from COMMENT_SYNC_CUTOFF file (path in env var) or env var value, fallback hardcoded.
+        // Read from COMMENT_SYNC_CUTOFF file (path in env var) or env var value. No fallback — must be configured.
         private static readonly DateTime CommentSyncCutoffDate = ParseCutoffDate();
 
         private static DateTime ParseCutoffDate()
@@ -874,8 +874,9 @@ namespace MigrationTools.Processors
             string env = Environment.GetEnvironmentVariable("COMMENT_SYNC_CUTOFF");
             if (!string.IsNullOrEmpty(env) && DateTime.TryParse(env, null, System.Globalization.DateTimeStyles.RoundtripKind, out DateTime parsed))
                 return parsed.ToUniversalTime();
-            // 3. Hardcoded fallback
-            return new DateTime(2026, 3, 27, 18, 0, 0, DateTimeKind.Utc);
+            // 3. No fallback — cutoff date is mandatory
+            throw new InvalidOperationException(
+                "COMMENT_SYNC_CUTOFF is not configured. Set COMMENT_SYNC_CUTOFF_FILE env var pointing to a file with an ISO 8601 date, or set COMMENT_SYNC_CUTOFF env var directly.");
         }
 
         private async Task SyncMissingCommentsAsync(WorkItemData sourceWorkItem, WorkItemData targetWorkItem)
