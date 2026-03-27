@@ -629,13 +629,12 @@ namespace MigrationTools.Processors
                         }
                         if (targetWorkItem != null)
                         {
-                            // Only sync comments via API when revision replay couldn't run
-                            // (date-based filtering prevented it). When replay ran, comments
-                            // are already handled via System.History revision replay.
                             if (!revisionReplayRan)
                             {
+                                // No revision replay — detect and sync missing comments via API.
                                 await SyncMissingCommentsAsync(sourceWorkItem, targetWorkItem);
                             }
+                            // When replay ran, markers are added inline during ReplayRevisions.
                             targetWorkItem.ToWorkItem().Close();
                         }
                         if (sourceWorkItem != null)
@@ -1242,6 +1241,27 @@ namespace MigrationTools.Processors
                     CommonTools.RevisionManager.AttachSourceRevisionHistoryJsonToTarget(sourceWorkItem, targetWorkItem);
                 }
 
+                // Build source comment lookup for sync-src marker injection.
+                // Primary match: exact content. Fallback: rev.ChangedDate == comment.modifiedDate.
+                // Fetch source comments for sync-src marker injection during replay.
+                // Match strategy: exact content first, then content + modifiedDate for edited comments.
+                Newtonsoft.Json.Linq.JArray replaySourceComments = null;
+                string replaySourceOrg = GetSourceOrgName();
+                if (int.TryParse(sourceWorkItem.Id, out int replaySourceId))
+                {
+                    try
+                    {
+                        replaySourceComments = GetCommentsViaApi(
+                            Source.Options.Collection.AbsoluteUri, Source.Options.Project,
+                            Source.Options.Authentication.AccessToken, replaySourceId);
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.LogWarning("Failed to fetch source comments for marker injection: {Error}", ex.Message);
+                    }
+                }
+                var usedSourceCommentIds = new HashSet<string>();
+
                 // Track the historical date we SET on each revision (not the server's response).
                 // After a bypassRules save, the server honours the historical ChangedDate on
                 // the revision but the SOAP WorkItem object may report the server clock instead.
@@ -1391,7 +1411,53 @@ namespace MigrationTools.Processors
                     }
                     targetWorkItem.ToWorkItem().Fields["System.ChangedDate"].Value = revision.ChangedDate;
                     targetWorkItem.ToWorkItem().Fields["System.ChangedBy"].Value = revision.Fields["System.ChangedBy"].Value.ToString();
-                    targetWorkItem.ToWorkItem().Fields["System.History"].Value = revision.Fields["System.History"].Value;
+                    // Inject sync-src marker into System.History for comments after cutoff
+                    string historyContent = revision.Fields.ContainsKey("System.History")
+                        ? revision.Fields["System.History"].Value?.ToString() : null;
+                    if (!string.IsNullOrEmpty(historyContent) && revision.ChangedDate >= CommentSyncCutoffDate
+                        && replaySourceComments != null)
+                    {
+                        string matchedCommentId = null;
+                        string revDateIso = revision.ChangedDate.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss", System.Globalization.CultureInfo.InvariantCulture);
+
+                        foreach (var sc in replaySourceComments)
+                        {
+                            string scId = sc["id"]?.ToString() ?? "";
+                            if (usedSourceCommentIds.Contains(scId)) continue;
+
+                            string scText = sc["text"]?.ToString() ?? "";
+                            string scModified = sc["modifiedDate"]?.ToString() ?? "";
+
+                            // Match by content + modifiedDate (truncated to second)
+                            bool textMatch = scText == historyContent;
+                            bool dateMatch = !string.IsNullOrEmpty(scModified)
+                                && scModified.StartsWith(revDateIso, StringComparison.OrdinalIgnoreCase);
+
+                            if (textMatch && dateMatch)
+                            {
+                                matchedCommentId = scId;
+                                break;
+                            }
+                        }
+
+                        if (matchedCommentId != null)
+                        {
+                            usedSourceCommentIds.Add(matchedCommentId);
+                            string marker = $"<!-- sync-src:{WebUtility.HtmlEncode(replaySourceOrg)}:{matchedCommentId} -->";
+                            historyContent = marker + historyContent;
+                            TraceWriteLine(LogEventLevel.Information, " Injected sync marker for source comment {CommentId} in revision {RevisionNumber}",
+                                new Dictionary<string, object>() { { "CommentId", matchedCommentId }, { "RevisionNumber", revision.Number } });
+                        }
+                        else
+                        {
+                            // No match = unidentified comment — do not sync
+                            historyContent = null;
+                            TraceWriteLine(LogEventLevel.Warning, " Skipped comment in revision {RevisionNumber}: no matching source comment found (content+date)",
+                                new Dictionary<string, object>() { { "RevisionNumber", revision.Number } });
+                        }
+                    }
+                    targetWorkItem.ToWorkItem().Fields["System.History"].Value = historyContent
+                        ?? revision.Fields["System.History"].Value;
 
                     // Todo: Ensure all field maps use WorkItemData.Fields to apply a correct mapping
                     CommonTools.FieldMappingTool.ApplyFieldMappings(currentRevisionWorkItem, targetWorkItem);
