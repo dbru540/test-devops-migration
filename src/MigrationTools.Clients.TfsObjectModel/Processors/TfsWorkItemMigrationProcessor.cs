@@ -875,7 +875,7 @@ namespace MigrationTools.Processors
             if (!string.IsNullOrEmpty(env) && DateTime.TryParse(env, null, System.Globalization.DateTimeStyles.RoundtripKind, out DateTime parsed))
                 return parsed.ToUniversalTime();
             // 3. Hardcoded fallback
-            return new DateTime(2026, 3, 27, 16, 0, 0, DateTimeKind.Utc);
+            return new DateTime(2026, 3, 27, 18, 0, 0, DateTimeKind.Utc);
         }
 
         private async Task SyncMissingCommentsAsync(WorkItemData sourceWorkItem, WorkItemData targetWorkItem)
