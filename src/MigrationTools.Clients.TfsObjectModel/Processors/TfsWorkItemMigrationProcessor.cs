@@ -978,7 +978,7 @@ namespace MigrationTools.Processors
                     string dateHeader = "";
                     if (DateTime.TryParse(originalDateStr, null, System.Globalization.DateTimeStyles.RoundtripKind, out DateTime originalDate))
                     {
-                        dateHeader = $"<b>[Original date: {originalDate.ToLocalTime():yyyy-MM-dd HH:mm}]</b><br>";
+                        dateHeader = $"<b>[Original date: {originalDate.ToUniversalTime():yyyy-MM-dd HH:mm} UTC]</b><br>";
                     }
 
                     // Build author identity string for impersonation via bypassRules
@@ -1008,7 +1008,7 @@ namespace MigrationTools.Processors
                     string dateHeader = "";
                     if (DateTime.TryParse(originalDateStr, null, System.Globalization.DateTimeStyles.RoundtripKind, out DateTime originalDate))
                     {
-                        dateHeader = $"<b>[Original date: {originalDate.ToLocalTime():yyyy-MM-dd HH:mm}]</b><br>";
+                        dateHeader = $"<b>[Original date: {originalDate.ToUniversalTime():yyyy-MM-dd HH:mm} UTC]</b><br>";
                     }
 
                     await UpdateCommentViaApiAsync(targetId, int.Parse(targetCommentId), marker + dateHeader + updatedText);
@@ -1202,7 +1202,7 @@ namespace MigrationTools.Processors
 
                 // Post comment via REST API (VS402625 fallback — revision replay failed)
                 int targetId = int.Parse(targetWorkItem.Id);
-                string dateHeader = $"<b>[Original date: {originalDate.ToLocalTime():yyyy-MM-dd HH:mm}]</b><br>";
+                string dateHeader = $"<b>[Original date: {originalDate.ToUniversalTime():yyyy-MM-dd HH:mm} UTC]</b><br>";
                 PostCommentViaApiAsync(targetId, dateHeader + commentText, author).GetAwaiter().GetResult();
 
                 TraceWriteLine(LogEventLevel.Warning,
