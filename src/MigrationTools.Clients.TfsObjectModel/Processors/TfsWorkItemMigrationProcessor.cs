@@ -1343,6 +1343,33 @@ namespace MigrationTools.Processors
             }
         }
 
+        private void SetReflectedWorkItemIdViaApi(string collectionUri, string project, string pat,
+            int workItemId, string fieldReferenceName, string reflectedValue)
+        {
+            string baseUri = collectionUri.TrimEnd('/');
+            string requestUri = $"{baseUri}/{Uri.EscapeDataString(project)}/_apis/wit/workitems/{workItemId}?api-version=7.0";
+
+            var patchOps = new Newtonsoft.Json.Linq.JArray();
+            patchOps.Add(new Newtonsoft.Json.Linq.JObject
+            {
+                ["op"] = "add",
+                ["path"] = $"/fields/{fieldReferenceName}",
+                ["value"] = reflectedValue
+            });
+
+            using (var client = new HttpClient())
+            {
+                client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
+                    "Basic", Convert.ToBase64String(Encoding.ASCII.GetBytes($":{pat}")));
+                using (var content = new StringContent(patchOps.ToString(), Encoding.UTF8, "application/json-patch+json"))
+                {
+                    var request = new HttpRequestMessage(new HttpMethod("PATCH"), requestUri) { Content = content };
+                    var response = client.SendAsync(request).GetAwaiter().GetResult();
+                    response.EnsureSuccessStatusCode();
+                }
+            }
+        }
+
         private bool TrySaveOrFallbackComment(WorkItemData targetWorkItem, RevisionItem revision, string historyValue, ref DateTime lastSavedDate)
         {
             try
@@ -1713,6 +1740,42 @@ namespace MigrationTools.Processors
                     }
 
                     CommonTools.Attachment.CleanUpAfterSave();
+
+                    // Set ReflectedWorkItemId on the SOURCE work item (counterpart)
+                    // so both sides know about each other. Uses REST API since source
+                    // is in a different org/project.
+                    try
+                    {
+                        var targetReflectedUri = (TfsReflectedWorkItemId)Target.WorkItems.CreateReflectedWorkItemId(targetWorkItem);
+                        int sourceId = int.Parse(sourceWorkItem.Id);
+                        string sourceReflectedField = Source.Options.ReflectedWorkItemIdField;
+                        string currentSourceReflected = sourceWorkItem.ToWorkItem().Fields.Contains(sourceReflectedField)
+                            ? sourceWorkItem.ToWorkItem().Fields[sourceReflectedField].Value?.ToString() ?? ""
+                            : "";
+                        string targetReflectedValue = targetReflectedUri.ToString();
+
+                        if (!targetReflectedValue.Equals(currentSourceReflected, StringComparison.OrdinalIgnoreCase))
+                        {
+                            SetReflectedWorkItemIdViaApi(
+                                Source.Options.Collection.AbsoluteUri,
+                                Source.Options.Project,
+                                Source.Options.Authentication.AccessToken,
+                                sourceId,
+                                sourceReflectedField,
+                                targetReflectedValue);
+                            TraceWriteLine(LogEventLevel.Information,
+                                "Set ReflectedWorkItemId on source WI#{SourceId} → {TargetReflectedUri}",
+                                new Dictionary<string, object>() {
+                                    { "SourceId", sourceId },
+                                    { "TargetReflectedUri", targetReflectedValue }
+                                });
+                        }
+                    }
+                    catch (Exception reflEx)
+                    {
+                        Log.LogWarning("Failed to set ReflectedWorkItemId on source WI#{SourceId}: {Error}",
+                            sourceWorkItem.Id, reflEx.Message);
+                    }
                 }
             }
             catch (Exception ex)
