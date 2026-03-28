@@ -29,6 +29,7 @@ namespace MigrationTools.Tools
         private Project _targetProject;
 
         private readonly IDictionary<string, string> _cachedUploadedUrisBySourceValue;
+        private readonly List<int> _allDummyWorkItemIds = new List<int>();
 
         private WorkItem _targetDummyWorkItem;
 
@@ -73,11 +74,50 @@ namespace MigrationTools.Tools
 
         public void ProcessorExecutionEnd(TfsProcessor processor)
         {
-            _processor = processor;
+            if (processor != null) _processor = processor;
             if (_targetDummyWorkItem != null)
             {
                 _targetDummyWorkItem.Close();
-                _targetProject.Store.DestroyWorkItems(new List<int> { _targetDummyWorkItem.Id });
+            }
+            // Delete all dummy work items created during this run via REST API.
+            // REST DELETE (soft delete to recycle bin) requires lower permissions
+            // than the SOAP DestroyWorkItems (permanent delete).
+            if (_allDummyWorkItemIds.Count > 0 && _processor != null)
+            {
+                string baseUri = _processor.Target.Options.Collection.AbsoluteUri.TrimEnd('/');
+                string project = Uri.EscapeDataString(_processor.Target.Options.Project);
+                string token = _processor.Target.Options.Authentication.AccessToken;
+
+                using (var client = new HttpClient())
+                {
+                    client.DefaultRequestHeaders.Authorization =
+                        new AuthenticationHeaderValue("Basic",
+                            Convert.ToBase64String(Encoding.ASCII.GetBytes($":{token}")));
+
+                    foreach (int dummyId in _allDummyWorkItemIds)
+                    {
+                        try
+                        {
+                            string url = $"{baseUri}/{project}/_apis/wit/workItems/{dummyId}?api-version=7.1";
+                            var response = client.DeleteAsync(url).Result;
+                            if (response.IsSuccessStatusCode)
+                            {
+                                Log.LogInformation("Deleted dummy work item {DummyId} via REST API", dummyId);
+                            }
+                            else
+                            {
+                                Log.LogWarning("Failed to delete dummy work item {DummyId}: HTTP {StatusCode}",
+                                    dummyId, (int)response.StatusCode);
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Log.LogWarning("Error deleting dummy work item {DummyId}: {Error}",
+                                dummyId, ex.Message);
+                        }
+                    }
+                }
+                _allDummyWorkItemIds.Clear();
             }
         }
 
@@ -605,6 +645,7 @@ namespace MigrationTools.Tools
             if (_DummyWorkItemCount > 900)
             {
                 Log.LogDebug("EmbededImagesRepairEnricher: Dummy workitem {id} is neering capacity. Creating a new one!", _targetDummyWorkItem.Id);
+                _targetDummyWorkItem.Close();
                 _targetDummyWorkItem = null;
                 _DummyWorkItemCount = 0;
             }
@@ -649,7 +690,7 @@ namespace MigrationTools.Tools
                 else
                 {
                     Log.LogDebug("TfsEmbededImagesTool: Dummy workitem {id} created on the target collection.", _targetDummyWorkItem.Id);
-                    //_targetProject.Store.DestroyWorkItems(new List<int> { _targetDummyWorkItem.Id });
+                    _allDummyWorkItemIds.Add(_targetDummyWorkItem.Id);
                 }
             }
             _DummyWorkItemCount++;

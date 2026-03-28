@@ -634,12 +634,9 @@ namespace MigrationTools.Processors
                         }
                         if (targetWorkItem != null)
                         {
-                            if (!revisionReplayRan)
-                            {
-                                // No revision replay — detect and sync missing comments via API.
-                                await SyncMissingCommentsAsync(sourceWorkItem, targetWorkItem);
-                            }
-                            // When replay ran, markers are added inline during ReplayRevisions.
+                            // Always run comment sync: handles missing comments AND injects markers
+                            // into comments written by revision replay (WIT Object Model strips HTML markers)
+                            await SyncMissingCommentsAsync(sourceWorkItem, targetWorkItem);
                             targetWorkItem.ToWorkItem().Close();
                         }
                         if (sourceWorkItem != null)
@@ -858,8 +855,33 @@ namespace MigrationTools.Processors
 
         private static readonly System.Text.RegularExpressions.Regex SyncSrcMarkerRegex =
             new System.Text.RegularExpressions.Regex(
-                @"<!--\s*sync-src:([^:]+):(\d+)\s*-->",
+                @"<span\s+style=""display:none;?"">sync-src:([^:]+):(\d+)</span>",
                 System.Text.RegularExpressions.RegexOptions.Compiled);
+
+        /// <summary>Normalize comment HTML for cross-org content comparison.
+        /// Strips/neutralizes all org-specific content (attachment URLs, WI refs, mention GUIDs, markers, date headers).</summary>
+        private static string NormalizeCommentForComparison(string html)
+        {
+            if (string.IsNullOrWhiteSpace(html)) return "";
+            string n = html;
+            // Strip sync-src markers
+            n = SyncSrcMarkerRegex.Replace(n, "");
+            // Strip [Original date:] headers
+            n = System.Text.RegularExpressions.Regex.Replace(n, @"<b>\[Original date:[^\]]*\]</b><br>", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            // Normalize <img> tags (attachment URLs differ cross-org)
+            n = System.Text.RegularExpressions.Regex.Replace(n, @"<img\s[^>]*>", "[IMG]", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            // Normalize attachment URLs in <a href> and other contexts
+            n = System.Text.RegularExpressions.Regex.Replace(n, @"https?://dev\.azure\.com/[^""'\s]+/_apis/wit/attachments/[^""'\s]+", "[ATTACH]", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            // Normalize WI edit URLs: dev.azure.com/ORG/PROJECT/_workitems/edit/ID → [WI_URL]
+            n = System.Text.RegularExpressions.Regex.Replace(n, @"https?://dev\.azure\.com/[^""'\s]+/_workitems/edit/\d+", "[WI_URL]", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            // Normalize #ID WI references (4+ digits)
+            n = System.Text.RegularExpressions.Regex.Replace(n, @"(?<=#)\d{4,}", "[ID]");
+            // Normalize mention GUIDs
+            n = System.Text.RegularExpressions.Regex.Replace(n, @"data-vss-mention=""[^""]*""", "data-vss-mention=\"\"", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            // Normalize any remaining org/project GUIDs in URLs
+            n = System.Text.RegularExpressions.Regex.Replace(n, @"https?://dev\.azure\.com/[^/""'\s]+/[^/""'\s]+/", "[ADO_BASE]/", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            return n.Trim();
+        }
 
         // Comments created before this date are considered already synced (or out of scope).
         // Read from COMMENT_SYNC_CUTOFF file (path in env var) or env var value. No fallback — must be configured.
@@ -912,9 +934,18 @@ namespace MigrationTools.Processors
                     }
                 }
 
-                // Find missing and modified source comments (marker-based only)
+                // Find missing, modified, and needs-marker source comments
                 var missing = new List<Newtonsoft.Json.Linq.JToken>();
                 var modified = new List<(Newtonsoft.Json.Linq.JToken source, Newtonsoft.Json.Linq.JToken target)>();
+                var needsMarker = new List<(Newtonsoft.Json.Linq.JToken source, Newtonsoft.Json.Linq.JToken target)>();
+                var usedTargetCommentIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                // Pre-mark target comments that already have markers
+                foreach (var tc in targetComments)
+                {
+                    if (SyncSrcMarkerRegex.IsMatch(tc["text"]?.ToString() ?? ""))
+                        usedTargetCommentIds.Add(tc["id"]?.ToString() ?? "");
+                }
+
                 foreach (var sc in sourceComments)
                 {
                     string rawText = sc["text"]?.ToString() ?? "";
@@ -937,7 +968,7 @@ namespace MigrationTools.Processors
                     if (isSyncAccount)
                         continue;
                     // Anti-loop: skip comments that are themselves synced copies
-                    if (rawText.Contains("<!-- sync-src:"))
+                    if (SyncSrcMarkerRegex.IsMatch(rawText))
                         continue;
 
                     // Marker-based match: check if already synced
@@ -955,13 +986,45 @@ namespace MigrationTools.Processors
                         continue;
                     }
 
+                    // Content-based fallback: match by normalized content (handles revision replay without markers)
+                    string srcNorm = NormalizeCommentForComparison(rawText);
+                    bool contentMatched = false;
+                    foreach (var tc in targetComments)
+                    {
+                        string tcId = tc["id"]?.ToString() ?? "";
+                        if (usedTargetCommentIds.Contains(tcId)) continue;
+                        string tcNorm = NormalizeCommentForComparison(tc["text"]?.ToString() ?? "");
+                        if (srcNorm.Equals(tcNorm, StringComparison.OrdinalIgnoreCase))
+                        {
+                            usedTargetCommentIds.Add(tcId);
+                            needsMarker.Add((sc, tc));
+                            contentMatched = true;
+                            TraceWriteLine(LogEventLevel.Information, " Content-matched source comment {CommentId} to target comment {TargetCommentId}",
+                                new Dictionary<string, object>() { { "CommentId", commentId }, { "TargetCommentId", tcId } });
+                            break;
+                        }
+                    }
+                    if (contentMatched) continue;
+
                     missing.Add(sc);
+                }
+
+                // Inject markers into content-matched target comments via REST API
+                foreach (var (src, tgt) in needsMarker)
+                {
+                    string srcCId = src["id"]?.ToString() ?? "";
+                    string tgtCId = tgt["id"]?.ToString() ?? "";
+                    string tgtText = tgt["text"]?.ToString() ?? "";
+                    string marker = $"<span style=\"display:none\">sync-src:{WebUtility.HtmlEncode(sourceOrg)}:{srcCId}</span>";
+                    await UpdateCommentViaApiAsync(targetId, int.Parse(tgtCId), marker + tgtText);
+                    TraceWriteLine(LogEventLevel.Information, " Injected marker into target comment {TargetCommentId} for source {SourceCommentId}",
+                        new Dictionary<string, object>() { { "TargetCommentId", tgtCId }, { "SourceCommentId", srcCId } });
                 }
 
                 if (missing.Count == 0 && modified.Count == 0)
                 {
-                    TraceWriteLine(LogEventLevel.Debug, "Comment sync: all {SourceCount} source comments found on target {TargetWorkItemId}",
-                        new Dictionary<string, object>() { { "SourceCount", sourceComments.Count }, { "TargetWorkItemId", targetWorkItem.Id } });
+                    TraceWriteLine(LogEventLevel.Debug, "Comment sync: {SourceCount} source comments on target {TargetWorkItemId} ({MarkerCount} needed marker injection)",
+                        new Dictionary<string, object>() { { "SourceCount", sourceComments.Count }, { "TargetWorkItemId", targetWorkItem.Id }, { "MarkerCount", needsMarker.Count } });
                     return;
                 }
 
@@ -984,7 +1047,7 @@ namespace MigrationTools.Processors
                     originalText = RewriteCommentImagesForTarget(originalText, targetId);
                     originalText = RewriteCommentWorkItemLinks(originalText);
                     originalText = RewriteCommentMentions(originalText);
-                    string marker = $"<!-- sync-src:{WebUtility.HtmlEncode(sourceOrg)}:{commentId} -->";
+                    string marker = $"<span style=\"display:none\">sync-src:{WebUtility.HtmlEncode(sourceOrg)}:{commentId}</span>";
 
                     // Add original date header (API path can't preserve the original timestamp)
                     string originalDateStr = comment["createdDate"]?.ToString();
@@ -1015,7 +1078,7 @@ namespace MigrationTools.Processors
                     updatedText = RewriteCommentImagesForTarget(updatedText, targetId);
                     updatedText = RewriteCommentWorkItemLinks(updatedText);
                     updatedText = RewriteCommentMentions(updatedText);
-                    string marker = $"<!-- sync-src:{WebUtility.HtmlEncode(sourceOrg)}:{commentId} -->";
+                    string marker = $"<span style=\"display:none\">sync-src:{WebUtility.HtmlEncode(sourceOrg)}:{commentId}</span>";
 
                     string originalDateStr = source["createdDate"]?.ToString();
                     string dateHeader = "";
@@ -1407,7 +1470,7 @@ namespace MigrationTools.Processors
                         revChangedBy.Equals("Migration", StringComparison.OrdinalIgnoreCase) ||
                         revHistory.Contains("[Synced comment -") ||
                         revHistory.Contains("[BACKFILL -") ||
-                        revHistory.Contains("<!-- sync-src:");
+                        SyncSrcMarkerRegex.IsMatch(revHistory);
                     if (isSyncGenerated)
                     {
                         TraceWriteLine(LogEventLevel.Information, " Skipping sync-generated revision [{RevisionNumber}] (ChangedBy: {ChangedBy})",
@@ -1564,7 +1627,7 @@ namespace MigrationTools.Processors
                         if (matchedCommentId != null)
                         {
                             usedSourceCommentIds.Add(matchedCommentId);
-                            string marker = $"<!-- sync-src:{WebUtility.HtmlEncode(replaySourceOrg)}:{matchedCommentId} -->";
+                            string marker = $"<span style=\"display:none\">sync-src:{WebUtility.HtmlEncode(replaySourceOrg)}:{matchedCommentId}</span>";
                             historyContent = marker + historyContent;
                             TraceWriteLine(LogEventLevel.Information, " Injected sync marker for source comment {CommentId} in revision {RevisionNumber}",
                                 new Dictionary<string, object>() { { "CommentId", matchedCommentId }, { "RevisionNumber", revision.Number } });
