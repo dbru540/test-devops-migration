@@ -76,7 +76,7 @@ namespace MigrationTools.Processors
         private static int _totalWorkItem = 0;
         private static string workItemLogTemplate = "[{sourceWorkItemTypeName,20}][Complete:{currentWorkItem,6}/{totalWorkItems}][sid:{sourceWorkItemId,6}|Rev:{sourceRevisionInt,3}][tid:{targetWorkItemId,6} | ";
         private List<string> _ignore;
-        private Lazy<List<Microsoft.TeamFoundation.Framework.Client.TeamFoundationIdentity>> _targetIdentitiesCache;
+        private Lazy<Dictionary<string, string>> _targetIdentitiesCache;
 
         private ILogger contextLog;
         private ILogger workItemLog;
@@ -131,18 +131,64 @@ namespace MigrationTools.Processors
             ValidatePatTokenRequirement();
             //////////////////////////////////////////////////
 
-            _targetIdentitiesCache = new Lazy<List<Microsoft.TeamFoundation.Framework.Client.TeamFoundationIdentity>>(() =>
+            _targetIdentitiesCache = new Lazy<Dictionary<string, string>>(() =>
             {
                 try
                 {
-                    var identityService = Target.GetService<IIdentityManagementService>();
-                    var tfi = identityService.ReadIdentity(IdentitySearchFactor.General, "Project Collection Valid Users", MembershipQuery.Expanded, ReadIdentityOptions.None);
-                    return identityService.ReadIdentities(tfi.Members, MembershipQuery.None, ReadIdentityOptions.None).ToList();
+                    // Extract org name from target collection URI for VSSPS calls
+                    Uri collUri = Target.Options.Collection;
+                    string orgName = null;
+                    if (collUri.Host.Contains("dev.azure.com") && collUri.Segments.Length > 1)
+                        orgName = collUri.Segments[1].Trim('/');
+                    else if (collUri.Host.Contains("visualstudio.com"))
+                        orgName = collUri.Host.Split('.')[0];
+                    if (string.IsNullOrWhiteSpace(orgName))
+                    {
+                        Log.LogWarning("Cannot determine target org name from {Uri} — mention rewriting disabled.", collUri);
+                        return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                    }
+
+                    string pat = Target.Options.Authentication.AccessToken;
+                    string vsspsBase = $"https://vssps.dev.azure.com/{orgName}";
+                    var dict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+                    using (var client = new HttpClient())
+                    {
+                        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
+                            "Basic", Convert.ToBase64String(Encoding.ASCII.GetBytes($":{pat}")));
+
+                        // Step 1: Get all users via Graph API
+                        string json = client.GetStringAsync($"{vsspsBase}/_apis/graph/users?api-version=7.1-preview.1").Result;
+                        var data = Newtonsoft.Json.Linq.JObject.Parse(json);
+                        var users = data["value"] ?? new Newtonsoft.Json.Linq.JArray();
+
+                        foreach (var user in users)
+                        {
+                            string displayName = user["displayName"]?.ToString();
+                            string descriptor = user["descriptor"]?.ToString();
+                            if (string.IsNullOrWhiteSpace(displayName) || string.IsNullOrWhiteSpace(descriptor))
+                                continue;
+
+                            // Step 2: Resolve descriptor → TeamFoundationId via storage keys
+                            try
+                            {
+                                string skJson = client.GetStringAsync(
+                                    $"{vsspsBase}/_apis/graph/storagekeys/{descriptor}?api-version=7.1-preview.1").Result;
+                                var skData = Newtonsoft.Json.Linq.JObject.Parse(skJson);
+                                string tfId = skData["value"]?.ToString();
+                                if (!string.IsNullOrWhiteSpace(tfId))
+                                    dict[displayName] = tfId;
+                            }
+                            catch { /* skip users whose storage key can't be resolved */ }
+                        }
+                    }
+                    Log.LogInformation("Loaded {Count} identities from target via REST API for mention rewriting.", dict.Count);
+                    return dict;
                 }
                 catch (Exception ex)
                 {
-                    Log.LogError(ex, "Unable to load identities from target collection for comment mention rewriting.");
-                    return new List<Microsoft.TeamFoundation.Framework.Client.TeamFoundationIdentity>();
+                    Log.LogError(ex, "Unable to load identities from target via REST API for comment mention rewriting.");
+                    return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                 }
             });
 
@@ -756,7 +802,7 @@ namespace MigrationTools.Processors
 
         private static readonly System.Text.RegularExpressions.Regex MentionAnchorRegex =
             new System.Text.RegularExpressions.Regex(
-                @"<a[^>]*?(?:href=""(?<href>[^""]*)""|(?<version>data-vss-mention=""[^""]*""))[^>]*>(?<value>.*?)</a>",
+                @"<a[^>]*?href=""(?<href>[^""]*?)""[^>]*?(?<version>data-vss-mention=""[^""]*?"")[^>]*>(?<value>.*?)</a>",
                 System.Text.RegularExpressions.RegexOptions.Compiled | System.Text.RegularExpressions.RegexOptions.Singleline);
 
         private string RewriteCommentMentions(string commentHtml)
@@ -777,12 +823,11 @@ namespace MigrationTools.Processors
                     return match.Value;
 
                 var displayName = value.Substring(1);
-                var identity = _targetIdentitiesCache.Value.FirstOrDefault(i => i.DisplayName == displayName);
-                if (identity != null)
+                if (_targetIdentitiesCache.Value.TryGetValue(displayName, out string targetOriginId))
                 {
                     return match.Value
                         .Replace(href, "#")
-                        .Replace(version, $"data-vss-mention=\"version:2.0,{identity.TeamFoundationId}\"");
+                        .Replace(version, $"data-vss-mention=\"version:2.0,{targetOriginId}\"");
                 }
 
                 return match.Value;
@@ -793,13 +838,35 @@ namespace MigrationTools.Processors
         {
             if (string.IsNullOrWhiteSpace(commentHtml)) return commentHtml;
 
-            string sourceOrg = Source.Options.Collection.AbsoluteUri.TrimEnd('/');
             string targetOrg = Target.Options.Collection.AbsoluteUri.TrimEnd('/');
             string targetProject = Target.Options.Project;
 
-            // Match work item URLs: .../org/project/_workitems/edit/12345
+            // Match full <a> tags containing work item URLs, capturing the link text
+            var wiAnchorRegex = new System.Text.RegularExpressions.Regex(
+                @"(<a\b[^>]*href="")(https?://dev\.azure\.com/[^""]+/_workitems/edit/)(\d+)(""[^>]*>)(.*?)(</a>)",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Singleline);
+
+            commentHtml = wiAnchorRegex.Replace(commentHtml, match =>
+            {
+                if (int.TryParse(match.Groups[3].Value, out int sourceId))
+                {
+                    int? targetId = ResolveTargetWorkItemId(sourceId);
+                    if (targetId.HasValue)
+                    {
+                        string newUrl = $"{targetOrg}/{Uri.EscapeDataString(targetProject)}/_workitems/edit/{targetId.Value}";
+                        // Also rewrite #ID in the link text
+                        string linkText = match.Groups[5].Value;
+                        linkText = System.Text.RegularExpressions.Regex.Replace(
+                            linkText, @"#\d+", $"#{targetId.Value}");
+                        return match.Groups[1].Value + newUrl + match.Groups[4].Value + linkText + match.Groups[6].Value;
+                    }
+                }
+                return match.Value;
+            });
+
+            // Match standalone work item URLs not inside <a> tags
             var wiUrlRegex = new System.Text.RegularExpressions.Regex(
-                @"https?://dev\.azure\.com/[^""'\s]+/_workitems/edit/(?<id>\d+)",
+                @"(?<!href="")https?://dev\.azure\.com/[^""'\s]+/_workitems/edit/(?<id>\d+)",
                 System.Text.RegularExpressions.RegexOptions.IgnoreCase);
 
             commentHtml = wiUrlRegex.Replace(commentHtml, match =>
@@ -810,19 +877,19 @@ namespace MigrationTools.Processors
                     if (targetId.HasValue)
                         return $"{targetOrg}/{Uri.EscapeDataString(targetProject)}/_workitems/edit/{targetId.Value}";
                 }
-                return match.Value; // keep original if no mapping found
+                return match.Value;
             });
 
-            // Match #12345 style mentions (inside mention widgets or plain text)
+            // Match #ID in plain text (not inside <a> tags) — minimum 1 digit
             var hashMentionRegex = new System.Text.RegularExpressions.Regex(
-                @"(?<=#)\b(\d{4,})\b");
+                @"(?<=>)([^<]*?)#(\d+)");
             commentHtml = hashMentionRegex.Replace(commentHtml, match =>
             {
-                if (int.TryParse(match.Value, out int sourceId))
+                if (int.TryParse(match.Groups[2].Value, out int sourceId))
                 {
                     int? targetId = ResolveTargetWorkItemId(sourceId);
                     if (targetId.HasValue)
-                        return targetId.Value.ToString();
+                        return $"{match.Groups[1].Value}#{targetId.Value}";
                 }
                 return match.Value;
             });
@@ -838,9 +905,51 @@ namespace MigrationTools.Processors
                 client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
                     "Basic", Convert.ToBase64String(Encoding.ASCII.GetBytes($":{token}")));
                 string json = client.GetStringAsync(requestUri).Result;
-                var data = Newtonsoft.Json.Linq.JObject.Parse(json);
+                var reader = new Newtonsoft.Json.JsonTextReader(new System.IO.StringReader(json))
+                    { DateParseHandling = Newtonsoft.Json.DateParseHandling.None };
+                var data = Newtonsoft.Json.Linq.JObject.Load(reader);
                 return (Newtonsoft.Json.Linq.JArray)data["comments"] ?? new Newtonsoft.Json.Linq.JArray();
             }
+        }
+
+        private DateTime? GetLatestCommentDate(string baseUri, string project, string token, int workItemId)
+        {
+            try
+            {
+                // Fetch recent comments (newest first) and find the latest NATIVE one
+                // (skip synced comments whose createdDate reflects the API call time, not the original date)
+                string requestUri = $"{baseUri.TrimEnd('/')}/{Uri.EscapeDataString(project)}/_apis/wit/workItems/{workItemId}/comments?api-version=7.1-preview.4&$top=10";
+                using (var client = new HttpClient())
+                {
+                    client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
+                        "Basic", Convert.ToBase64String(Encoding.ASCII.GetBytes($":{token}")));
+                    string json = client.GetStringAsync(requestUri).Result;
+                    var reader = new Newtonsoft.Json.JsonTextReader(new System.IO.StringReader(json))
+                        { DateParseHandling = Newtonsoft.Json.DateParseHandling.None };
+                    var data = Newtonsoft.Json.Linq.JObject.Load(reader);
+                    var comments = data["comments"] as Newtonsoft.Json.Linq.JArray;
+                    if (comments != null)
+                    {
+                        foreach (var c in comments)
+                        {
+                            string text = c["text"]?.ToString() ?? "";
+                            // Skip synced comments (their createdDate is the sync time, not original)
+                            if (SyncSrcMarkerRegex.IsMatch(text)) continue;
+                            if (text.Contains("[Original date:")) continue;
+
+                            string dateStr = c["createdDate"]?.ToString();
+                            if (DateTime.TryParse(dateStr, null, System.Globalization.DateTimeStyles.RoundtripKind, out DateTime parsed))
+                                return parsed;
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                TraceWriteLine(LogEventLevel.Warning, "GetLatestCommentDate failed for WI {WorkItemId}: {Error}",
+                    new Dictionary<string, object>() { { "WorkItemId", workItemId }, { "Error", ex.Message } });
+            }
+            return null;
         }
 
         private string GetSourceOrgName()
@@ -881,6 +990,49 @@ namespace MigrationTools.Processors
             // Normalize any remaining org/project GUIDs in URLs
             n = System.Text.RegularExpressions.Regex.Replace(n, @"https?://dev\.azure\.com/[^/""'\s]+/[^/""'\s]+/", "[ADO_BASE]/", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
             return n.Trim();
+        }
+
+        // Antiloop: service account emails read from ANTILOOP_ACCOUNTS env var (comma-separated).
+        private static readonly HashSet<string> AntiloopAccounts = ParseAntiloopAccounts();
+
+        private static HashSet<string> ParseAntiloopAccounts()
+        {
+            string env = Environment.GetEnvironmentVariable("ANTILOOP_ACCOUNTS");
+            var accounts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (!string.IsNullOrEmpty(env))
+            {
+                foreach (var account in env.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries))
+                {
+                    accounts.Add(account.Trim());
+                }
+            }
+            return accounts;
+        }
+
+        private static bool IsAntiloopAccount(string identity)
+        {
+            if (string.IsNullOrEmpty(identity)) return false;
+            return AntiloopAccounts.Any(a =>
+                identity.IndexOf(a, StringComparison.OrdinalIgnoreCase) >= 0 ||
+                (a.Contains("@") && identity.IndexOf(a.Split('@')[0], StringComparison.OrdinalIgnoreCase) >= 0));
+        }
+
+        private static string GetRevisionFieldValue(RevisionItem revision, string fieldName)
+        {
+            return revision.Fields.ContainsKey(fieldName)
+                ? revision.Fields[fieldName].Value?.ToString() ?? ""
+                : "";
+        }
+
+        private static bool IsSyncGeneratedRevision(RevisionItem revision)
+        {
+            string revHistory = GetRevisionFieldValue(revision, "System.History");
+            return
+                IsAntiloopAccount(GetRevisionFieldValue(revision, "System.ChangedBy")) ||
+                IsAntiloopAccount(GetRevisionFieldValue(revision, "System.AuthorizedAs")) ||
+                revHistory.Contains("[Synced comment -") ||
+                revHistory.Contains("[BACKFILL -") ||
+                SyncSrcMarkerRegex.IsMatch(revHistory);
         }
 
         // Comments created before this date are considered already synced (or out of scope).
@@ -958,13 +1110,9 @@ namespace MigrationTools.Processors
                         && createdDate < CommentSyncCutoffDate)
                         continue;
 
-                    // Anti-loop: skip comments created by sync service accounts
+                    // Anti-loop: skip comments created by sync service accounts (from ANTILOOP_ACCOUNTS env var)
                     string commentAuthorUniqueName = sc["createdBy"]?["uniqueName"]?.ToString() ?? "";
-                    bool isSyncAccount =
-                        commentAuthorUniqueName.Equals("svc-msflow@fiveforty.fr", StringComparison.OrdinalIgnoreCase) ||
-                        commentAuthorUniqueName.Equals("svc-d365-devops@cityzmedia.fr", StringComparison.OrdinalIgnoreCase) ||
-                        commentAuthorUniqueName.Equals("admin-d365@christofle.com", StringComparison.OrdinalIgnoreCase) ||
-                        commentAuthor.IndexOf("Migration", StringComparison.OrdinalIgnoreCase) >= 0;
+                    bool isSyncAccount = IsAntiloopAccount(commentAuthorUniqueName) || IsAntiloopAccount(commentAuthor);
                     if (isSyncAccount)
                         continue;
                     // Anti-loop: skip comments that are themselves synced copies
@@ -1036,6 +1184,20 @@ namespace MigrationTools.Processors
                     return;
                 }
 
+                // Find latest native (non-synced) comment date on target
+                DateTime? latestNativeTargetCommentDate = null;
+                foreach (var tc in targetComments)
+                {
+                    string tcText = tc["text"]?.ToString() ?? "";
+                    if (SyncSrcMarkerRegex.IsMatch(tcText) || tcText.Contains("[Original date:")) continue;
+                    string tcDateStr = tc["createdDate"]?.ToString();
+                    if (DateTime.TryParse(tcDateStr, null, System.Globalization.DateTimeStyles.RoundtripKind, out DateTime tcDate))
+                    {
+                        latestNativeTargetCommentDate = tcDate;
+                        break; // API returns newest first
+                    }
+                }
+
                 // Post missing comments in chronological order (API returns newest first)
                 missing.Reverse();
                 foreach (var comment in missing)
@@ -1049,12 +1211,15 @@ namespace MigrationTools.Processors
                     originalText = RewriteCommentMentions(originalText);
                     string marker = $"<span style=\"display:none\">sync-src:{WebUtility.HtmlEncode(sourceOrg)}:{commentId}</span>";
 
-                    // Add original date header (API path can't preserve the original timestamp)
+                    // Add original date header only if a native comment on target is more recent
+                    // (true interleave). If only field revisions are more recent, skip the header.
                     string originalDateStr = comment["createdDate"]?.ToString();
                     string dateHeader = "";
-                    if (DateTime.TryParse(originalDateStr, null, System.Globalization.DateTimeStyles.RoundtripKind, out DateTime originalDate))
+                    if (DateTime.TryParse(originalDateStr, null, System.Globalization.DateTimeStyles.RoundtripKind, out DateTime originalDate)
+                        && latestNativeTargetCommentDate.HasValue
+                        && originalDate < latestNativeTargetCommentDate.Value)
                     {
-                        dateHeader = $"<b>[Original date: {originalDate.ToUniversalTime():yyyy-MM-dd HH:mm} UTC]</b><br>";
+                        dateHeader = $"<b>[Original date: {originalDate.ToUniversalTime():yyyy-MM-dd HH:mm:ss} UTC]</b><br>";
                     }
 
                     // Build author identity string for impersonation via bypassRules
@@ -1084,7 +1249,7 @@ namespace MigrationTools.Processors
                     string dateHeader = "";
                     if (DateTime.TryParse(originalDateStr, null, System.Globalization.DateTimeStyles.RoundtripKind, out DateTime originalDate))
                     {
-                        dateHeader = $"<b>[Original date: {originalDate.ToUniversalTime():yyyy-MM-dd HH:mm} UTC]</b><br>";
+                        dateHeader = $"<b>[Original date: {originalDate.ToUniversalTime():yyyy-MM-dd HH:mm:ss} UTC]</b><br>";
                     }
 
                     await UpdateCommentViaApiAsync(targetId, int.Parse(targetCommentId), marker + dateHeader + updatedText);
@@ -1276,6 +1441,7 @@ namespace MigrationTools.Processors
             string alertPat = Environment.GetEnvironmentVariable("ALERT_PAT");
             string mentionGuid = Environment.GetEnvironmentVariable("ALERT_MENTION_GUID");
             string mentionName = Environment.GetEnvironmentVariable("ALERT_MENTION_NAME");
+            string alertClient = Environment.GetEnvironmentVariable("ALERT_CLIENT") ?? "";
 
             if (string.IsNullOrEmpty(alertOrg) || string.IsNullOrEmpty(alertWiId) || string.IsNullOrEmpty(alertPat))
                 return;
@@ -1283,15 +1449,18 @@ namespace MigrationTools.Processors
             try
             {
                 string sourceOrg = GetSourceOrgName();
+                string sourceProject = Source.Options.Project;
                 string targetOrg = Target.Options.Collection.AbsoluteUri.TrimEnd('/');
+                string targetProject = Target.Options.Project;
                 string mention = !string.IsNullOrEmpty(mentionGuid)
                     ? $"<a href=\"#\" data-vss-mention=\"version:2.0,{mentionGuid}\">@{WebUtility.HtmlEncode(mentionName ?? "Alert")}</a> "
                     : "";
+                string clientTag = !string.IsNullOrEmpty(alertClient) ? $"[{alertClient.ToUpper()}] " : "";
 
-                string commentText = $"{mention}<b>[SYNC ALERT]</b> {action}: " +
+                string commentText = $"{mention}<b>[SYNC ALERT]</b> {clientTag}{action}: " +
                     $"<b>{commentCount}</b> comment(s) synced via API from " +
-                    $"<b>{sourceOrg} WI#{sourceWorkItemId}</b> to " +
-                    $"<b>{targetOrg} WI#{targetWorkItemId}</b> " +
+                    $"<b>{sourceOrg}/{sourceProject} WI#{sourceWorkItemId}</b> → " +
+                    $"<b>{targetOrg}/{targetProject} WI#{targetWorkItemId}</b> " +
                     $"at {DateTime.UtcNow:yyyy-MM-dd HH:mm} UTC";
 
                 string requestUri = $"https://dev.azure.com/{alertOrg}/{Uri.EscapeDataString(alertProject ?? alertOrg)}/_apis/wit/workitems/{alertWiId}?api-version=7.0";
@@ -1412,7 +1581,7 @@ namespace MigrationTools.Processors
 
                 // Post comment via REST API (VS402625 fallback — revision replay failed)
                 int targetId = int.Parse(targetWorkItem.Id);
-                string dateHeader = $"<b>[Original date: {originalDate.ToUniversalTime():yyyy-MM-dd HH:mm} UTC]</b><br>";
+                string dateHeader = $"<b>[Original date: {originalDate.ToUniversalTime():yyyy-MM-dd HH:mm:ss} UTC]</b><br>";
                 PostCommentViaApiAsync(targetId, dateHeader + commentText, author).GetAwaiter().GetResult();
 
                 TraceWriteLine(LogEventLevel.Warning,
@@ -1488,16 +1657,7 @@ namespace MigrationTools.Processors
                     string revChangedBy = revision.Fields.ContainsKey("System.ChangedBy")
                         ? revision.Fields["System.ChangedBy"].Value?.ToString() ?? ""
                         : "";
-                    string revHistory = revision.Fields.ContainsKey("System.History")
-                        ? revision.Fields["System.History"].Value?.ToString() ?? ""
-                        : "";
-                    bool isSyncGenerated =
-                        (revChangedBy.IndexOf("svc", StringComparison.OrdinalIgnoreCase) >= 0 &&
-                         revChangedBy.IndexOf("msflow", StringComparison.OrdinalIgnoreCase) >= 0) ||
-                        revChangedBy.Equals("Migration", StringComparison.OrdinalIgnoreCase) ||
-                        revHistory.Contains("[Synced comment -") ||
-                        revHistory.Contains("[BACKFILL -") ||
-                        SyncSrcMarkerRegex.IsMatch(revHistory);
+                    bool isSyncGenerated = IsSyncGeneratedRevision(revision);
                     if (isSyncGenerated)
                     {
                         TraceWriteLine(LogEventLevel.Information, " Skipping sync-generated revision [{RevisionNumber}] (ChangedBy: {ChangedBy})",
