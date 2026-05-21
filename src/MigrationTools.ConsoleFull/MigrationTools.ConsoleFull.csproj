@@ -6,9 +6,9 @@
     <Product>Azure DevOps Migration Tools [Object Model]</Product>
     <AssemblyName>devopsmigration</AssemblyName>
     <PlatformTarget>AnyCPU</PlatformTarget>
-    <Version>1.0.7</Version>
-    <FileVersion>1.0.7</FileVersion>
-    <InformationalVersion>1.0.7-fiveforty</InformationalVersion>
+    <Version>1.0.8</Version>
+    <FileVersion>1.0.8</FileVersion>
+    <InformationalVersion>1.0.8-fiveforty</InformationalVersion>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageProjectUrl>https://github.com/nkdAgility/azure-devops-migration-tools</PackageProjectUrl>
     <RepositoryUrl>https://github.com/nkdAgility/azure-devops-migration-tools</RepositoryUrl>

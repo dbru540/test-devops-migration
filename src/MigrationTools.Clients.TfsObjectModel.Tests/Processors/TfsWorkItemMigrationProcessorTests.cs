@@ -56,5 +56,42 @@ namespace MigrationTools.Processors.Tests
             Assert.IsTrue((bool)method.Invoke(null, new object[] { revision }));
         }
 
+        [TestMethod("TfsWorkItemMigrationProcessorTests_ObjectModel_Does_Not_Replay_PostCutoff_History"), TestCategory("L0")]
+        public void ObjectModel_Does_Not_Replay_PostCutoff_History()
+        {
+            RevisionItem revision = new RevisionItem
+            {
+                Number = 38,
+                ChangedDate = new DateTime(2026, 05, 21, 18, 48, 53, DateTimeKind.Utc),
+                Fields = new Dictionary<string, FieldItem>
+                {
+                    ["System.History"] = new FieldItem { Value = "<div>test </div>" },
+                },
+            };
+
+            MethodInfo method = typeof(TfsWorkItemMigrationProcessor).GetMethod("ShouldApplyHistoryViaObjectModel", BindingFlags.NonPublic | BindingFlags.Static);
+
+            Assert.IsNotNull(method);
+            Assert.IsFalse((bool)method.Invoke(null, new object[] { revision, new DateTime(2026, 01, 01, 0, 0, 0, DateTimeKind.Utc) }));
+        }
+
+        [TestMethod("TfsWorkItemMigrationProcessorTests_ObjectModel_Field_Classifier_Excludes_Comment_Metadata"), TestCategory("L0")]
+        public void ObjectModel_Field_Classifier_Excludes_Comment_Metadata()
+        {
+            MethodInfo method = typeof(TfsWorkItemMigrationProcessor).GetMethod("IsObjectModelReplayField", BindingFlags.NonPublic | BindingFlags.Static);
+            var ignoredFields = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                "System.CommentCount",
+                "System.AuthorizedDate",
+            };
+
+            Assert.IsNotNull(method);
+            Assert.IsFalse((bool)method.Invoke(null, new object[] { "System.History", ignoredFields }));
+            Assert.IsFalse((bool)method.Invoke(null, new object[] { "System.ChangedBy", ignoredFields }));
+            Assert.IsFalse((bool)method.Invoke(null, new object[] { "System.ChangedDate", ignoredFields }));
+            Assert.IsFalse((bool)method.Invoke(null, new object[] { "System.CommentCount", ignoredFields }));
+            Assert.IsTrue((bool)method.Invoke(null, new object[] { "Microsoft.VSTS.Scheduling.RemainingWork", ignoredFields }));
+        }
+
     }
 }

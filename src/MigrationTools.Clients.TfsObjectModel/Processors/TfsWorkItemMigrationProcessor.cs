@@ -491,7 +491,7 @@ namespace MigrationTools.Processors
         }
 
         // TODO : Make this into the Work Item mapping tool
-        private void PopulateWorkItem(WorkItemData oldWorkItemData, WorkItemData newWorkItemData, string destType)
+        private void PopulateWorkItem(WorkItemData oldWorkItemData, WorkItemData newWorkItemData, string destType, bool applyHistoryViaObjectModel = true)
         {
             var oldWorkItem = oldWorkItemData.ToWorkItem();
             var newWorkItem = newWorkItemData.ToWorkItem();
@@ -519,6 +519,11 @@ namespace MigrationTools.Processors
 
             foreach (Field f in oldWorkItem.Fields)
             {
+                if (!applyHistoryViaObjectModel && f.ReferenceName == "System.History")
+                {
+                    continue;
+                }
+
                 CommonTools.UserMapping.MapUserIdentityField(f);
                 if (newWorkItem.Fields.Contains(f.ReferenceName))
                 {
@@ -639,12 +644,10 @@ namespace MigrationTools.Processors
                             { "ReplayRevisions", CommonTools.RevisionManager.ReplayRevisions }}
                             );
                         List<RevisionItem> revisionsToMigrate = CommonTools.RevisionManager.GetRevisionsToMigrate(sourceWorkItem.Revisions.Values.ToList(), targetWorkItem?.Revisions.Values.ToList());
-                        bool revisionReplayRan = false;
                         if (targetWorkItem == null)
                         {
                             targetWorkItem = ReplayRevisions(revisionsToMigrate, sourceWorkItem, null);
                             activity?.SetTag("Revisions", revisionsToMigrate.Count);
-                            revisionReplayRan = true;
                         }
                         else
                         {
@@ -666,7 +669,6 @@ namespace MigrationTools.Processors
                                     });
 
                                 targetWorkItem = ReplayRevisions(revisionsToMigrate, sourceWorkItem, targetWorkItem);
-                                revisionReplayRan = true;
                             }
                         }
                         if (targetWorkItem != null && targetWorkItem.ToWorkItem().IsDirty)
@@ -680,8 +682,8 @@ namespace MigrationTools.Processors
                         }
                         if (targetWorkItem != null)
                         {
-                            // Always run comment sync: handles missing comments AND injects markers
-                            // into comments written by revision replay (WIT Object Model strips HTML markers)
+                            // Always run comment sync: the API owns post-cutoff comments and
+                            // can still inject markers into legacy content-matched comments.
                             await SyncMissingCommentsAsync(sourceWorkItem, targetWorkItem);
                             targetWorkItem.ToWorkItem().Close();
                         }
@@ -1033,6 +1035,50 @@ namespace MigrationTools.Processors
                 revHistory.Contains("[Synced comment -") ||
                 revHistory.Contains("[BACKFILL -") ||
                 SyncSrcMarkerRegex.IsMatch(revHistory);
+        }
+
+        private static bool ShouldApplyHistoryViaObjectModel(RevisionItem revision, DateTime commentSyncCutoffDate)
+        {
+            if (revision == null) return false;
+
+            string history = GetRevisionFieldValue(revision, "System.History");
+            if (string.IsNullOrWhiteSpace(history)) return false;
+
+            return revision.ChangedDate.ToUniversalTime() < commentSyncCutoffDate.ToUniversalTime();
+        }
+
+        private static bool IsObjectModelReplayField(string referenceName, ICollection<string> ignoredFields)
+        {
+            if (string.IsNullOrWhiteSpace(referenceName)) return false;
+            if (referenceName == "System.History") return false;
+            if (referenceName == "System.ChangedBy") return false;
+            if (referenceName == "System.ChangedDate") return false;
+            if (ignoredFields != null && ignoredFields.Contains(referenceName)) return false;
+
+            return true;
+        }
+
+        private bool HasObjectModelReplayChanges(WorkItemData revisionWorkItem)
+        {
+            try
+            {
+                WorkItem workItem = revisionWorkItem?.ToWorkItem();
+                if (workItem == null) return true;
+
+                foreach (Field field in workItem.Fields)
+                {
+                    if (field.IsChangedInRevision && IsObjectModelReplayField(field.ReferenceName, _ignore))
+                    {
+                        return true;
+                    }
+                }
+
+                return false;
+            }
+            catch
+            {
+                return true;
+            }
         }
 
         // Comments created before this date are considered already synced (or out of scope).
@@ -1598,6 +1644,8 @@ namespace MigrationTools.Processors
         {
             try
             {
+                bool targetCreatedForReplay = targetWorkItem == null;
+
                 //If work item hasn't been created yet, create a shell
                 if (targetWorkItem == null)
                 {
@@ -1620,27 +1668,6 @@ namespace MigrationTools.Processors
                 {
                     CommonTools.RevisionManager.AttachSourceRevisionHistoryJsonToTarget(sourceWorkItem, targetWorkItem);
                 }
-
-                // Build source comment lookup for sync-src marker injection.
-                // Primary match: exact content. Fallback: rev.ChangedDate == comment.modifiedDate.
-                // Fetch source comments for sync-src marker injection during replay.
-                // Match strategy: exact content first, then content + modifiedDate for edited comments.
-                Newtonsoft.Json.Linq.JArray replaySourceComments = null;
-                string replaySourceOrg = GetSourceOrgName();
-                if (int.TryParse(sourceWorkItem.Id, out int replaySourceId))
-                {
-                    try
-                    {
-                        replaySourceComments = GetCommentsViaApi(
-                            Source.Options.Collection.AbsoluteUri, Source.Options.Project,
-                            Source.Options.Authentication.AccessToken, replaySourceId);
-                    }
-                    catch (Exception ex)
-                    {
-                        Log.LogWarning("Failed to fetch source comments for marker injection: {Error}", ex.Message);
-                    }
-                }
-                var usedSourceCommentIds = new HashSet<string>();
 
                 // Track the historical date we SET on each revision (not the server's response).
                 // After a bypassRules save, the server honours the historical ChangedDate on
@@ -1748,7 +1775,16 @@ namespace MigrationTools.Processors
                         targetWorkItem = Target.WorkItems.GetWorkItem(workItemId);
                         lastSavedDate = typeChangeDate;
                     }
-                    PopulateWorkItem(currentRevisionWorkItem, targetWorkItem, destType);
+                    bool applyHistoryViaObjectModel = ShouldApplyHistoryViaObjectModel(revision, CommentSyncCutoffDate);
+                    bool hasObjectModelReplayChanges = typeChange || HasObjectModelReplayChanges(currentRevisionWorkItem);
+                    if (!targetCreatedForReplay && !applyHistoryViaObjectModel && !hasObjectModelReplayChanges)
+                    {
+                        TraceWriteLine(LogEventLevel.Information, " Skipped Object Model replay for revision {RevisionNumber}; only API-owned comment metadata changed",
+                            new Dictionary<string, object>() { { "RevisionNumber", revision.Number } });
+                        continue;
+                    }
+
+                    PopulateWorkItem(currentRevisionWorkItem, targetWorkItem, destType, applyHistoryViaObjectModel);
 
                     var fails = ((WorkItem)targetWorkItem.internalObject).Validate();
                     foreach (Field f in fails)
@@ -1782,53 +1818,16 @@ namespace MigrationTools.Processors
                     }
                     targetWorkItem.ToWorkItem().Fields["System.ChangedDate"].Value = revision.ChangedDate;
                     targetWorkItem.ToWorkItem().Fields["System.ChangedBy"].Value = revision.Fields["System.ChangedBy"].Value.ToString();
-                    // Inject sync-src marker into System.History for comments after cutoff
-                    string historyContent = revision.Fields.ContainsKey("System.History")
-                        ? revision.Fields["System.History"].Value?.ToString() : null;
-                    if (!string.IsNullOrEmpty(historyContent) && revision.ChangedDate >= CommentSyncCutoffDate
-                        && replaySourceComments != null)
+                    if (applyHistoryViaObjectModel)
                     {
-                        string matchedCommentId = null;
-                        string revDateIso = revision.ChangedDate.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss", System.Globalization.CultureInfo.InvariantCulture);
-
-                        foreach (var sc in replaySourceComments)
-                        {
-                            string scId = sc["id"]?.ToString() ?? "";
-                            if (usedSourceCommentIds.Contains(scId)) continue;
-
-                            string scText = sc["text"]?.ToString() ?? "";
-                            string scModified = sc["modifiedDate"]?.ToString() ?? "";
-
-                            // Match by content + modifiedDate (truncated to second)
-                            bool textMatch = scText == historyContent;
-                            bool dateMatch = !string.IsNullOrEmpty(scModified)
-                                && scModified.StartsWith(revDateIso, StringComparison.OrdinalIgnoreCase);
-
-                            if (textMatch && dateMatch)
-                            {
-                                matchedCommentId = scId;
-                                break;
-                            }
-                        }
-
-                        if (matchedCommentId != null)
-                        {
-                            usedSourceCommentIds.Add(matchedCommentId);
-                            string marker = $"<span style=\"display:none\">sync-src:{WebUtility.HtmlEncode(replaySourceOrg)}:{matchedCommentId}</span>";
-                            historyContent = marker + historyContent;
-                            TraceWriteLine(LogEventLevel.Information, " Injected sync marker for source comment {CommentId} in revision {RevisionNumber}",
-                                new Dictionary<string, object>() { { "CommentId", matchedCommentId }, { "RevisionNumber", revision.Number } });
-                        }
-                        else
-                        {
-                            // No match = unidentified comment — do not sync
-                            historyContent = null;
-                            TraceWriteLine(LogEventLevel.Warning, " Skipped comment in revision {RevisionNumber}: no matching source comment found (content+date)",
-                                new Dictionary<string, object>() { { "RevisionNumber", revision.Number } });
-                        }
+                        targetWorkItem.ToWorkItem().Fields["System.History"].Value = revision.Fields["System.History"].Value;
                     }
-                    targetWorkItem.ToWorkItem().Fields["System.History"].Value = historyContent
-                        ?? revision.Fields["System.History"].Value;
+                    else if (revision.Fields.ContainsKey("System.History"))
+                    {
+                        targetWorkItem.ToWorkItem().Fields["System.History"].Value = null;
+                        TraceWriteLine(LogEventLevel.Information, " Skipped System.History in Object Model replay for revision {RevisionNumber}; comments are handled by API sync",
+                            new Dictionary<string, object>() { { "RevisionNumber", revision.Number } });
+                    }
 
                     // Todo: Ensure all field maps use WorkItemData.Fields to apply a correct mapping
                     CommonTools.FieldMappingTool.ApplyFieldMappings(currentRevisionWorkItem, targetWorkItem);
