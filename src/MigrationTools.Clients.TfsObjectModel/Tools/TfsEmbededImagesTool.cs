@@ -32,6 +32,7 @@ namespace MigrationTools.Tools
         private readonly List<int> _allDummyWorkItemIds = new List<int>();
 
         private WorkItem _targetDummyWorkItem;
+        private bool _embeddedImagesChangedInLastRun;
 
         public TfsEmbededImagesTool(IOptions<TfsEmbededImagesToolOptions> options, IServiceProvider services, ILogger<TfsEmbededImagesTool> logger, ITelemetryLogger telemetryLogger) : base(options, services, logger, telemetryLogger)
         {
@@ -42,6 +43,7 @@ namespace MigrationTools.Tools
         {
             _processor = processor;
             _targetProject = processor.Target.WorkItems.Project.ToProject();
+            _embeddedImagesChangedInLastRun = false;
             
             string? accessToken = processor.Source.Options.Authentication.AuthenticationMode switch
             {
@@ -58,8 +60,7 @@ namespace MigrationTools.Tools
             
             // DON'T SAVE HERE - Let the processor handle saving
             // The work item will be saved later in the attachment processing
-            var workItem = targetWorkItem.ToWorkItem();
-            if (workItem.IsDirty)
+            if (_embeddedImagesChangedInLastRun)
             {
                 Log.LogInformation("EMBEDDED IMAGES MODIFIED - Work item {Id} has pending changes that will be saved during attachment processing",
                     targetWorkItem.Id);
@@ -136,6 +137,7 @@ namespace MigrationTools.Tools
 
             var workItem = wi.ToWorkItem();
             bool anyChanges = false;
+            _embeddedImagesChangedInLastRun = false;
 
             // Check ALL fields including System.History (comments)
             foreach (Field field in workItem.Fields)
@@ -201,8 +203,7 @@ namespace MigrationTools.Tools
                         Log.LogWarning("URL organization: {Org}, Target organization: {Target}", imageOrg, targetOrg);
                         
                         // Check if it's an attachment URL and from wrong org
-                        if (imageUrl.Contains("/_apis/wit/attachments/") && 
-                            !imageOrg.Equals(targetOrg, StringComparison.OrdinalIgnoreCase))
+                        if (IsWrongOrganizationAttachmentUrl(imageUrl, targetOrg))
                         {
                             Log.LogWarning("WRONG ORG ATTACHMENT: {Url} is from {WrongOrg} but should be {CorrectOrg}",
                                 imageUrl, imageOrg, targetOrg);
@@ -241,11 +242,10 @@ namespace MigrationTools.Tools
                                 // Replace both the original URL and any HTML-encoded version
                                 modifiedValue = modifiedValue.Replace(match.Value, newImageLink);
                                 modifiedValue = modifiedValue.Replace(System.Net.WebUtility.HtmlEncode(match.Value), newImageLink);
-                                anyChanges = true;
                                 Log.LogInformation("Replaced embedded image URL in content: {Old} -> {New}", imageUrl, newImageLink);
                             }
                         }
-                        else if (!imageOrg.Equals(targetOrg, StringComparison.OrdinalIgnoreCase))
+                        else if (IsAzureDevOpsUrlFromWrongOrganization(imageUrl, targetOrg))
                         {
                             // Not an attachment but still wrong org
                             Log.LogWarning("Found non-attachment URL from wrong org: {Url}", imageUrl);
@@ -256,6 +256,7 @@ namespace MigrationTools.Tools
                     if (modifiedValue != originalValue)
                     {
                         field.Value = modifiedValue;
+                        anyChanges = true;
                         Log.LogInformation("Field {FieldName} ({RefName}) updated with new URLs",
                             field.Name, field.ReferenceName);
                     }
@@ -287,6 +288,7 @@ namespace MigrationTools.Tools
             
             if (anyChanges)
             {
+                _embeddedImagesChangedInLastRun = true;
                 Log.LogInformation("Embedded images changes made - Work item {Id} needs to be saved", wi.Id);
             }
             else
@@ -322,6 +324,30 @@ namespace MigrationTools.Tools
                 Log.LogError(ex, "Error checking organization for URL: {Url}", imageUrl);
                 return false;
             }
+        }
+
+        private static bool IsWrongOrganizationAttachmentUrl(string azureDevOpsUrl, string targetOrg)
+        {
+            return IsAzureDevOpsAttachmentUrl(azureDevOpsUrl)
+                && IsAzureDevOpsUrlFromWrongOrganization(azureDevOpsUrl, targetOrg);
+        }
+
+        private static bool IsAzureDevOpsAttachmentUrl(string azureDevOpsUrl)
+        {
+            if (!Uri.TryCreate(azureDevOpsUrl, UriKind.Absolute, out Uri uri))
+            {
+                return false;
+            }
+
+            return uri.AbsolutePath.IndexOf("/_apis/wit/attachments/", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static bool IsAzureDevOpsUrlFromWrongOrganization(string azureDevOpsUrl, string targetOrg)
+        {
+            string imageOrg = ExtractOrganization(azureDevOpsUrl);
+            return !string.IsNullOrEmpty(imageOrg)
+                && !string.IsNullOrEmpty(targetOrg)
+                && !imageOrg.Equals(targetOrg, StringComparison.OrdinalIgnoreCase);
         }
 
         private string UploadedAndRetrieveAttachmentLinkUrl(string matchedSourceUri, string sourceFieldName, WorkItemData targetWorkItem, string sourcePersonalAccessToken)
@@ -536,7 +562,7 @@ namespace MigrationTools.Tools
             return null;
         }
 
-        private string ExtractOrganization(string collectionUrl)
+        private static string ExtractOrganization(string collectionUrl)
         {
             Uri uri = new Uri(collectionUrl);
             string host = uri.Host.ToLower();
