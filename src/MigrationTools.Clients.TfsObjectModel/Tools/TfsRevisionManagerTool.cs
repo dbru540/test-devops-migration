@@ -140,7 +140,8 @@ namespace MigrationTools.Tools
                     sourceRevisions = sourceRevisions.Where(x => !targetChangedDates.Contains(x.ChangedDate)).ToList();
                     Log.LogDebug("TfsRevisionManagerTool::GetRevisionsToMigrate::RemoveRevisionsAlreadyOnTarget After removing Date Matches there are {sortedRevisionsCount} left", sourceRevisions.Count);
                 }
-                // Find Max target date and remove all source revisions that are newer
+                // Filter out source revisions older than target's latest revision.
+                // Missing comments are caught by SyncMissingCommentsAsync (API fallback).
                 var targetLatestDate = targetChangedDates.Max();
                 sourceRevisions = sourceRevisions.Where(x => x.ChangedDate > targetLatestDate).ToList();
                 Log.LogDebug("TfsRevisionManagerTool::GetRevisionsToMigrate::RemoveRevisionsAlreadyOnTarget After removing revisions before target latest date {targetLatestDate} there are {sortedRevisionsCount} left", targetLatestDate, sourceRevisions.Count);

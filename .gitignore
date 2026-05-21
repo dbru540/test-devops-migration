@@ -166,3 +166,4 @@ logs/
 /public/
 /docs/public/
 /docs/data/generated
+/.claude/settings.local.json
