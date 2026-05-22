@@ -92,6 +92,9 @@ DocProject/Help/html
 # Click-Once directory
 publish/
 
+# Windows reserved device name accidentally present in upstream history.
+nul
+
 # Publish Web Output
 *.Publish.xml
 
