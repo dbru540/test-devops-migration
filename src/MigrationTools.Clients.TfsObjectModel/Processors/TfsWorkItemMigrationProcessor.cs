@@ -1053,32 +1053,16 @@ namespace MigrationTools.Processors
             if (referenceName == "System.History") return false;
             if (referenceName == "System.ChangedBy") return false;
             if (referenceName == "System.ChangedDate") return false;
-            if (ignoredFields != null && ignoredFields.Contains(referenceName)) return false;
+            if (ignoredFields != null && ignoredFields.Any(f => string.Equals(f, referenceName, StringComparison.OrdinalIgnoreCase))) return false;
 
             return true;
         }
 
-        private bool HasObjectModelReplayChanges(WorkItemData revisionWorkItem)
+        private static bool RevisionHasObjectModelReplayChanges(RevisionItem revision, ICollection<string> ignoredFields)
         {
-            try
-            {
-                WorkItem workItem = revisionWorkItem?.ToWorkItem();
-                if (workItem == null) return true;
+            if (revision?.Fields == null) return true;
 
-                foreach (Field field in workItem.Fields)
-                {
-                    if (field.IsChangedInRevision && IsObjectModelReplayField(field.ReferenceName, _ignore))
-                    {
-                        return true;
-                    }
-                }
-
-                return false;
-            }
-            catch
-            {
-                return true;
-            }
+            return revision.Fields.Keys.Any(referenceName => IsObjectModelReplayField(referenceName, ignoredFields));
         }
 
         // Comments created before this date are considered already synced (or out of scope).
@@ -1776,7 +1760,7 @@ namespace MigrationTools.Processors
                         lastSavedDate = typeChangeDate;
                     }
                     bool applyHistoryViaObjectModel = ShouldApplyHistoryViaObjectModel(revision, CommentSyncCutoffDate);
-                    bool hasObjectModelReplayChanges = typeChange || HasObjectModelReplayChanges(currentRevisionWorkItem);
+                    bool hasObjectModelReplayChanges = typeChange || RevisionHasObjectModelReplayChanges(revision, _ignore);
                     if (!targetCreatedForReplay && !applyHistoryViaObjectModel && !hasObjectModelReplayChanges)
                     {
                         TraceWriteLine(LogEventLevel.Information, " Skipped Object Model replay for revision {RevisionNumber}; only API-owned comment metadata changed",

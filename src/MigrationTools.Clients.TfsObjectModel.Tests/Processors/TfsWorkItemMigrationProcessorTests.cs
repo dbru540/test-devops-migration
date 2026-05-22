@@ -93,5 +93,63 @@ namespace MigrationTools.Processors.Tests
             Assert.IsTrue((bool)method.Invoke(null, new object[] { "Microsoft.VSTS.Scheduling.RemainingWork", ignoredFields }));
         }
 
+        [TestMethod("TfsWorkItemMigrationProcessorTests_ObjectModel_Replays_PostCutoff_Business_Fields_Without_History"), TestCategory("L0")]
+        public void ObjectModel_Replays_PostCutoff_Business_Fields_Without_History()
+        {
+            RevisionItem revision = new RevisionItem
+            {
+                Number = 36,
+                ChangedDate = new DateTime(2026, 05, 21, 18, 48, 53, DateTimeKind.Utc),
+                Fields = new Dictionary<string, FieldItem>
+                {
+                    ["System.History"] = new FieldItem { Value = "<div>commentaire avec Task 185123</div>" },
+                    ["System.CommentCount"] = new FieldItem { Value = 15 },
+                    ["System.ChangedBy"] = new FieldItem { Value = "Nicolas Condomines <ncondomines@fiveforty.fr>" },
+                    ["System.ChangedDate"] = new FieldItem { Value = "2026-05-21T14:25:17.673Z" },
+                    ["Microsoft.VSTS.Scheduling.RemainingWork"] = new FieldItem { Value = 40 },
+                    ["Microsoft.VSTS.Scheduling.OriginalEstimate"] = new FieldItem { Value = 40 },
+                },
+            };
+            var ignoredFields = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                "System.CommentCount",
+            };
+
+            MethodInfo method = typeof(TfsWorkItemMigrationProcessor).GetMethod("RevisionHasObjectModelReplayChanges", BindingFlags.NonPublic | BindingFlags.Static);
+
+            Assert.IsNotNull(method);
+            Assert.IsTrue((bool)method.Invoke(null, new object[] { revision, ignoredFields }));
+        }
+
+        [TestMethod("TfsWorkItemMigrationProcessorTests_ObjectModel_Skips_PostCutoff_Comment_Only_Revision"), TestCategory("L0")]
+        public void ObjectModel_Skips_PostCutoff_Comment_Only_Revision()
+        {
+            RevisionItem revision = new RevisionItem
+            {
+                Number = 38,
+                ChangedDate = new DateTime(2026, 05, 21, 18, 48, 53, DateTimeKind.Utc),
+                Fields = new Dictionary<string, FieldItem>
+                {
+                    ["System.History"] = new FieldItem { Value = "<div>test </div>" },
+                    ["System.CommentCount"] = new FieldItem { Value = 16 },
+                    ["System.ChangedBy"] = new FieldItem { Value = "BRU, DAVID" },
+                    ["System.ChangedDate"] = new FieldItem { Value = "2026-05-21T18:48:53.853Z" },
+                    ["System.AuthorizedDate"] = new FieldItem { Value = "2026-05-21T18:48:53.913Z" },
+                    ["System.Watermark"] = new FieldItem { Value = 1518281 },
+                },
+            };
+            var ignoredFields = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                "System.CommentCount",
+                "System.AuthorizedDate",
+                "System.Watermark",
+            };
+
+            MethodInfo method = typeof(TfsWorkItemMigrationProcessor).GetMethod("RevisionHasObjectModelReplayChanges", BindingFlags.NonPublic | BindingFlags.Static);
+
+            Assert.IsNotNull(method);
+            Assert.IsFalse((bool)method.Invoke(null, new object[] { revision, ignoredFields }));
+        }
+
     }
 }
