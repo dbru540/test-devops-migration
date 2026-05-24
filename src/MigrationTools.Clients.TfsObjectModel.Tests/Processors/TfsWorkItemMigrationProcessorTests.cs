@@ -13,6 +13,11 @@ namespace MigrationTools.Processors.Tests
     [TestClass()]
     public class TfsWorkItemMigrationProcessorTests
     {
+        [TestInitialize]
+        public void ConfigureTestEnvironment()
+        {
+            Environment.SetEnvironmentVariable("COMMENT_SYNC_CUTOFF", "2026-01-01T00:00:00Z");
+        }
 
         [TestMethod("TfsWorkItemMigrationProcessorTests_OptionsValidator_Empty"), TestCategory("L0")]
         public void OptionsValidator_Empty()
@@ -149,6 +154,70 @@ namespace MigrationTools.Processors.Tests
 
             Assert.IsNotNull(method);
             Assert.IsFalse((bool)method.Invoke(null, new object[] { revision, ignoredFields }));
+        }
+
+        [TestMethod("TfsWorkItemMigrationProcessorTests_EventDelta_Parses_Changed_Fields_JSON"), TestCategory("L0")]
+        public void EventDelta_Parses_Changed_Fields_JSON()
+        {
+            MethodInfo method = typeof(TfsWorkItemMigrationProcessor).GetMethod("GetEventDeltaFieldNames", BindingFlags.NonPublic | BindingFlags.Static);
+
+            Assert.IsNotNull(method);
+            var fields = (ICollection<string>)method.Invoke(null, new object[]
+            {
+                "{\"System.Title\":{\"oldValue\":\"A\",\"newValue\":\"B\"},\"System.History\":{\"newValue\":\"comment\"},\"Microsoft.VSTS.Common.Priority\":{\"oldValue\":2,\"newValue\":4}}"
+            });
+
+            CollectionAssert.AreEquivalent(
+                new[] { "System.Title", "Microsoft.VSTS.Common.Priority" },
+                fields.ToArray());
+        }
+
+        [TestMethod("TfsWorkItemMigrationProcessorTests_EventDelta_Decodes_Changed_Fields_JSON_Base64"), TestCategory("L0")]
+        public void EventDelta_Decodes_Changed_Fields_JSON_Base64()
+        {
+            MethodInfo method = typeof(TfsWorkItemMigrationProcessor).GetMethod("DecodeEventDeltaChangedFieldsJson", BindingFlags.NonPublic | BindingFlags.Static);
+            string json = "{\"System.Title\":{\"oldValue\":\"Dossier d'affaires\",\"newValue\":\"Dossier \\\"final\\\"\"}}";
+            string encoded = Convert.ToBase64String(Encoding.UTF8.GetBytes(json));
+
+            Assert.IsNotNull(method);
+            string decoded = (string)method.Invoke(null, new object[] { encoded, "" });
+
+            Assert.AreEqual(json, decoded);
+        }
+
+        [TestMethod("TfsWorkItemMigrationProcessorTests_EventDelta_Detects_Field_Conflict"), TestCategory("L0")]
+        public void EventDelta_Detects_Field_Conflict()
+        {
+            MethodInfo method = typeof(TfsWorkItemMigrationProcessor).GetMethod("IsEventDeltaConflict", BindingFlags.NonPublic | BindingFlags.Static);
+
+            Assert.IsNotNull(method);
+            Assert.IsFalse((bool)method.Invoke(null, new object[] { "2", "2", "4" }));
+            Assert.IsFalse((bool)method.Invoke(null, new object[] { "2", "4", "4" }));
+            Assert.IsTrue((bool)method.Invoke(null, new object[] { "2", "1", "4" }));
+        }
+
+        [TestMethod("TfsWorkItemMigrationProcessorTests_EventDelta_Builds_Conflict_Comment"), TestCategory("L0")]
+        public void EventDelta_Builds_Conflict_Comment()
+        {
+            MethodInfo method = typeof(TfsWorkItemMigrationProcessor).GetMethod("BuildEventDeltaConflictComment", BindingFlags.NonPublic | BindingFlags.Static);
+
+            Assert.IsNotNull(method);
+            string comment = (string)method.Invoke(null, new object[]
+            {
+                "Microsoft.VSTS.Common.Priority",
+                "2",
+                "1",
+                "4",
+                "src",
+                12
+            });
+
+            StringAssert.Contains(comment, "Sync conflict resolved");
+            StringAssert.Contains(comment, "Microsoft.VSTS.Common.Priority");
+            StringAssert.Contains(comment, "Expected previous value: 2");
+            StringAssert.Contains(comment, "Conflicting target value: 1");
+            StringAssert.Contains(comment, "Applied latest value: 4");
+            StringAssert.Contains(comment, "latest event wins");
         }
 
     }

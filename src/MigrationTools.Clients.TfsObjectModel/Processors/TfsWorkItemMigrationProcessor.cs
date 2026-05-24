@@ -8,6 +8,7 @@ using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Threading.Tasks;
+using Newtonsoft.Json.Linq;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -491,7 +492,7 @@ namespace MigrationTools.Processors
         }
 
         // TODO : Make this into the Work Item mapping tool
-        private void PopulateWorkItem(WorkItemData oldWorkItemData, WorkItemData newWorkItemData, string destType, bool applyHistoryViaObjectModel = true)
+        private void PopulateWorkItem(WorkItemData oldWorkItemData, WorkItemData newWorkItemData, string destType, bool applyHistoryViaObjectModel = true, ICollection<string> fieldFilter = null)
         {
             var oldWorkItem = oldWorkItemData.ToWorkItem();
             var newWorkItem = newWorkItemData.ToWorkItem();
@@ -502,11 +503,18 @@ namespace MigrationTools.Processors
                 newWorkItem.Open();
             }
 
-            newWorkItem.Title = oldWorkItem.Title;
-            newWorkItem.State = oldWorkItem.State;
+            if (ShouldApplyDeltaField("System.Title", fieldFilter))
+            {
+                newWorkItem.Title = oldWorkItem.Title;
+            }
+            if (ShouldApplyDeltaField("System.State", fieldFilter))
+            {
+                newWorkItem.State = oldWorkItem.State;
+            }
             try
             {
-                if (newWorkItem.Fields.Contains("Microsoft.VSTS.Common.ClosedDate") && newWorkItem.Fields["Microsoft.VSTS.Common.ClosedDate"].IsEditable)
+                if (ShouldApplyDeltaField("Microsoft.VSTS.Common.ClosedDate", fieldFilter) &&
+                    newWorkItem.Fields.Contains("Microsoft.VSTS.Common.ClosedDate") && newWorkItem.Fields["Microsoft.VSTS.Common.ClosedDate"].IsEditable)
                 {
                     newWorkItem.Fields["Microsoft.VSTS.Common.ClosedDate"].Value = oldWorkItem.Fields["Microsoft.VSTS.Common.ClosedDate"].Value;
                 }
@@ -515,10 +523,18 @@ namespace MigrationTools.Processors
             {
                 // Intentionally swallowed - field may not exist in target project
             }
-            newWorkItem.Reason = oldWorkItem.Reason;
+            if (ShouldApplyDeltaField("System.Reason", fieldFilter))
+            {
+                newWorkItem.Reason = oldWorkItem.Reason;
+            }
 
             foreach (Field f in oldWorkItem.Fields)
             {
+                if (!ShouldApplyDeltaField(f.ReferenceName, fieldFilter))
+                {
+                    continue;
+                }
+
                 if (!applyHistoryViaObjectModel && f.ReferenceName == "System.History")
                 {
                     continue;
@@ -550,7 +566,9 @@ namespace MigrationTools.Processors
                         case FieldType.String:
                             string oldValue = oldWorkItem.Fields[f.ReferenceName].Value.ToString();
                             string newValue = CommonTools.StringManipulator.ProcessString(oldValue);
-                            newWorkItem.Fields[f.ReferenceName].Value = newValue;
+                            newWorkItem.Fields[f.ReferenceName].Value = f.ReferenceName == "System.Tags" && fieldFilter != null
+                                ? MergeTags(newWorkItem.Fields[f.ReferenceName].Value?.ToString(), newValue)
+                                : newValue;
                             break;
                         default:
                             newWorkItem.Fields[f.ReferenceName].Value = oldWorkItem.Fields[f.ReferenceName].Value;
@@ -563,8 +581,14 @@ namespace MigrationTools.Processors
             if (CommonTools.NodeStructure.Enabled)
             {
 
-                newWorkItem.AreaPath = CommonTools.NodeStructure.GetNewNodeName(oldWorkItem.AreaPath, TfsNodeStructureType.Area);
-                newWorkItem.IterationPath = CommonTools.NodeStructure.GetNewNodeName(oldWorkItem.IterationPath, TfsNodeStructureType.Iteration);
+                if (ShouldApplyDeltaField("System.AreaPath", fieldFilter))
+                {
+                    newWorkItem.AreaPath = CommonTools.NodeStructure.GetNewNodeName(oldWorkItem.AreaPath, TfsNodeStructureType.Area);
+                }
+                if (ShouldApplyDeltaField("System.IterationPath", fieldFilter))
+                {
+                    newWorkItem.IterationPath = CommonTools.NodeStructure.GetNewNodeName(oldWorkItem.IterationPath, TfsNodeStructureType.Iteration);
+                }
             }
             else
             {
@@ -576,27 +600,63 @@ namespace MigrationTools.Processors
                 case "Test Case":
                     try
                     {
-                        newWorkItem.Fields["Microsoft.VSTS.TCM.Steps"].Value = oldWorkItem.Fields["Microsoft.VSTS.TCM.Steps"].Value;
+                        if (ShouldApplyDeltaField("Microsoft.VSTS.TCM.Steps", fieldFilter))
+                        {
+                            newWorkItem.Fields["Microsoft.VSTS.TCM.Steps"].Value = oldWorkItem.Fields["Microsoft.VSTS.TCM.Steps"].Value;
+                        }
                     }
                     catch (FieldDefinitionNotExistException ex)
                     {
                         Log.LogWarning($"Microsoft.VSTS.TCM.Steps does not exist on Source Work Item. This field will be skipped, but the all other fields on the revision will be populated. Exception details: {ex.Message}");
                     }
-                    newWorkItem.Fields["Microsoft.VSTS.Common.Priority"].Value =
-                        oldWorkItem.Fields["Microsoft.VSTS.Common.Priority"].Value;
+                    if (ShouldApplyDeltaField("Microsoft.VSTS.Common.Priority", fieldFilter))
+                    {
+                        newWorkItem.Fields["Microsoft.VSTS.Common.Priority"].Value =
+                            oldWorkItem.Fields["Microsoft.VSTS.Common.Priority"].Value;
+                    }
                     break;
             }
 
-            if (newWorkItem.Fields.Contains("Microsoft.VSTS.Common.BacklogPriority")
+            if (ShouldApplyDeltaField("Microsoft.VSTS.Common.BacklogPriority", fieldFilter)
+                && newWorkItem.Fields.Contains("Microsoft.VSTS.Common.BacklogPriority")
                 && newWorkItem.Fields["Microsoft.VSTS.Common.BacklogPriority"].Value != null
                 && !IsNumeric(newWorkItem.Fields["Microsoft.VSTS.Common.BacklogPriority"].Value.ToString(),
                     NumberStyles.Any))
                 newWorkItem.Fields["Microsoft.VSTS.Common.BacklogPriority"].Value = 10;
 
-            var description = new StringBuilder();
-            description.Append(oldWorkItem.Description);
-            newWorkItem.Description = description.ToString();
+            if (ShouldApplyDeltaField("System.Description", fieldFilter))
+            {
+                var description = new StringBuilder();
+                description.Append(oldWorkItem.Description);
+                newWorkItem.Description = description.ToString();
+            }
             fieldMappingTimer.Stop();
+        }
+
+        private static bool ShouldApplyDeltaField(string referenceName, ICollection<string> fieldFilter)
+        {
+            return fieldFilter == null || fieldFilter.Contains(referenceName);
+        }
+
+        private static string MergeTags(string currentTags, string incomingTags)
+        {
+            var tags = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string tagList in new[] { currentTags, incomingTags })
+            {
+                if (string.IsNullOrWhiteSpace(tagList))
+                {
+                    continue;
+                }
+                foreach (string tag in tagList.Split(';'))
+                {
+                    string normalized = tag.Trim();
+                    if (!string.IsNullOrWhiteSpace(normalized))
+                    {
+                        tags.Add(normalized);
+                    }
+                }
+            }
+            return string.Join("; ", tags);
         }
 
         private void ProcessHTMLFieldAttachements(WorkItemData targetWorkItem)
@@ -643,14 +703,36 @@ namespace MigrationTools.Processors
                             { "sourceWorkItemRev", sourceWorkItem.Rev },
                             { "ReplayRevisions", CommonTools.RevisionManager.ReplayRevisions }}
                             );
-                        List<RevisionItem> revisionsToMigrate = CommonTools.RevisionManager.GetRevisionsToMigrate(sourceWorkItem.Revisions.Values.ToList(), targetWorkItem?.Revisions.Values.ToList());
+                        EventDeltaOptions eventDelta = GetEventDeltaOptionsFromEnvironment();
                         if (targetWorkItem == null)
                         {
+                            List<RevisionItem> revisionsToMigrate = CommonTools.RevisionManager.GetRevisionsToMigrate(sourceWorkItem.Revisions.Values.ToList(), null);
                             targetWorkItem = ReplayRevisions(revisionsToMigrate, sourceWorkItem, null);
                             activity?.SetTag("Revisions", revisionsToMigrate.Count);
                         }
+                        else if (eventDelta.HasPayload)
+                        {
+                            if (eventDelta.HasObjectModelFields)
+                            {
+                                TraceWriteLine(LogEventLevel.Information, "Applying event delta for revision {RevisionNumber} with {FieldCount} fields",
+                                    new Dictionary<string, object>()
+                                    {
+                                        { "RevisionNumber", eventDelta.RevisionNumber.GetValueOrDefault() },
+                                        { "FieldCount", eventDelta.FieldNames.Count }
+                                    });
+                                targetWorkItem = ApplyEventDelta(eventDelta, sourceWorkItem, targetWorkItem);
+                                activity?.SetTag("Revisions", 1);
+                            }
+                            else
+                            {
+                                TraceWriteLine(LogEventLevel.Information, "Skipping Object Model replay for event revision {RevisionNumber}; no delta-owned fields",
+                                    new Dictionary<string, object>() { { "RevisionNumber", eventDelta.RevisionNumber.GetValueOrDefault() } });
+                                activity?.SetTag("Revisions", 0);
+                            }
+                        }
                         else
                         {
+                            List<RevisionItem> revisionsToMigrate = CommonTools.RevisionManager.GetRevisionsToMigrate(sourceWorkItem.Revisions.Values.ToList(), targetWorkItem?.Revisions.Values.ToList());
                             if (revisionsToMigrate.Count == 0)
                             {
                                 ProcessWorkItemAttachments(sourceWorkItem, targetWorkItem, false);
@@ -1063,6 +1145,151 @@ namespace MigrationTools.Processors
             if (revision?.Fields == null) return true;
 
             return revision.Fields.Keys.Any(referenceName => IsObjectModelReplayField(referenceName, ignoredFields));
+        }
+
+        private sealed class EventDeltaOptions
+        {
+            public int? RevisionNumber { get; set; }
+            public string ChangedFieldsJson { get; set; }
+            public JObject ChangedFields { get; set; }
+            public ICollection<string> FieldNames { get; set; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            public bool HasPayload => RevisionNumber.HasValue && !string.IsNullOrWhiteSpace(ChangedFieldsJson);
+            public bool HasObjectModelFields => HasPayload && FieldNames.Count > 0;
+        }
+
+        private static EventDeltaOptions GetEventDeltaOptionsFromEnvironment()
+        {
+            string revisionValue = Environment.GetEnvironmentVariable("DEVOPSSYNC_EVENT_REVISION");
+            string changedFieldsJson = DecodeEventDeltaChangedFieldsJson(
+                Environment.GetEnvironmentVariable("DEVOPSSYNC_EVENT_CHANGED_FIELDS_JSON_BASE64"),
+                Environment.GetEnvironmentVariable("DEVOPSSYNC_EVENT_CHANGED_FIELDS_JSON"));
+
+            int revisionNumber;
+            int? parsedRevision = int.TryParse(revisionValue, out revisionNumber) ? revisionNumber : (int?)null;
+            JObject changedFields = ParseEventDeltaChangedFields(changedFieldsJson);
+
+            return new EventDeltaOptions
+            {
+                RevisionNumber = parsedRevision,
+                ChangedFieldsJson = changedFieldsJson,
+                ChangedFields = changedFields,
+                FieldNames = GetEventDeltaFieldNames(changedFieldsJson)
+            };
+        }
+
+        private static string DecodeEventDeltaChangedFieldsJson(string changedFieldsJsonBase64, string changedFieldsJson)
+        {
+            if (string.IsNullOrWhiteSpace(changedFieldsJsonBase64))
+            {
+                return changedFieldsJson ?? "";
+            }
+
+            try
+            {
+                byte[] bytes = Convert.FromBase64String(changedFieldsJsonBase64);
+                return Encoding.UTF8.GetString(bytes);
+            }
+            catch
+            {
+                return changedFieldsJson ?? "";
+            }
+        }
+
+        private static JObject ParseEventDeltaChangedFields(string changedFieldsJson)
+        {
+            if (string.IsNullOrWhiteSpace(changedFieldsJson))
+            {
+                return new JObject();
+            }
+
+            try
+            {
+                return JObject.Parse(changedFieldsJson);
+            }
+            catch
+            {
+                return new JObject();
+            }
+        }
+
+        private static ICollection<string> GetEventDeltaFieldNames(string changedFieldsJson)
+        {
+            JObject changedFields = ParseEventDeltaChangedFields(changedFieldsJson);
+            var fieldNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (JProperty property in changedFields.Properties())
+            {
+                if (IsEventDeltaReplayField(property.Name))
+                {
+                    fieldNames.Add(property.Name);
+                }
+            }
+            return fieldNames;
+        }
+
+        private static bool IsEventDeltaReplayField(string referenceName)
+        {
+            if (string.IsNullOrWhiteSpace(referenceName)) return false;
+            if (referenceName == "System.History") return false;
+            if (referenceName == "System.Rev") return false;
+            if (referenceName == "System.ChangedBy") return false;
+            if (referenceName == "System.ChangedDate") return false;
+            if (referenceName == "System.AuthorizedAs") return false;
+            if (referenceName == "System.AuthorizedDate") return false;
+            if (referenceName == "System.RevisedDate") return false;
+            if (referenceName == "System.Watermark") return false;
+            if (referenceName == "System.CommentCount") return false;
+            return true;
+        }
+
+        private static string GetEventDeltaValue(JObject changedFields, string referenceName, string propertyName)
+        {
+            JToken field = changedFields?[referenceName];
+            if (field == null)
+            {
+                return "";
+            }
+            if (field.Type == JTokenType.Object)
+            {
+                JToken value = field[propertyName];
+                return value == null || value.Type == JTokenType.Null ? "" : value.ToString();
+            }
+            return propertyName == "newValue" ? field.ToString() : "";
+        }
+
+        private static bool IsEventDeltaConflict(string expectedOldValue, string currentTargetValue, string incomingNewValue)
+        {
+            string expected = NormalizeConflictValue(expectedOldValue);
+            string current = NormalizeConflictValue(currentTargetValue);
+            string incoming = NormalizeConflictValue(incomingNewValue);
+
+            if (string.Equals(current, expected, StringComparison.Ordinal))
+            {
+                return false;
+            }
+            if (string.Equals(current, incoming, StringComparison.Ordinal))
+            {
+                return false;
+            }
+            return true;
+        }
+
+        private static string NormalizeConflictValue(string value)
+        {
+            return string.IsNullOrWhiteSpace(value) ? "" : value.Trim();
+        }
+
+        private static string BuildEventDeltaConflictComment(string fieldName, string expectedOldValue, string currentTargetValue, string incomingNewValue, string direction, int revisionNumber)
+        {
+            return
+                "<span style=\"display:none;\">sync-src:conflict:event-delta</span>" +
+                "<b>[Sync conflict resolved]</b><br/>" +
+                $"Field: {WebUtility.HtmlEncode(fieldName)}<br/>" +
+                $"Direction: {WebUtility.HtmlEncode(direction)}<br/>" +
+                $"Revision: {revisionNumber}<br/>" +
+                $"Expected previous value: {WebUtility.HtmlEncode(expectedOldValue)}<br/>" +
+                $"Conflicting target value: {WebUtility.HtmlEncode(currentTargetValue)}<br/>" +
+                $"Applied latest value: {WebUtility.HtmlEncode(incomingNewValue)}<br/>" +
+                "Rule: latest event wins";
         }
 
         // Comments created before this date are considered already synced (or out of scope).
@@ -1622,6 +1849,115 @@ namespace MigrationTools.Processors
                     });
                 return true;
             }
+        }
+
+        private WorkItemData ApplyEventDelta(EventDeltaOptions eventDelta, WorkItemData sourceWorkItem, WorkItemData targetWorkItem)
+        {
+            if (!eventDelta.RevisionNumber.HasValue)
+            {
+                throw new InvalidOperationException("Event delta mode requires DEVOPSSYNC_EVENT_REVISION.");
+            }
+
+            RevisionItem revision = sourceWorkItem.Revisions.Values.FirstOrDefault(r => r.Number == eventDelta.RevisionNumber.Value);
+            if (revision == null)
+            {
+                throw new InvalidOperationException($"Event delta revision {eventDelta.RevisionNumber.Value} was not found on source work item {sourceWorkItem.Id}.");
+            }
+
+            if (IsSyncGeneratedRevision(revision))
+            {
+                TraceWriteLine(LogEventLevel.Information, " Skipping sync-generated event delta revision [{RevisionNumber}]",
+                    new Dictionary<string, object>() { { "RevisionNumber", revision.Number } });
+                return targetWorkItem;
+            }
+
+            var currentRevisionWorkItem = sourceWorkItem.GetRevision(revision.Number);
+            var destType = currentRevisionWorkItem.Type;
+            if (CommonTools.WorkItemTypeMapping.Mappings.ContainsKey(destType))
+            {
+                destType = CommonTools.WorkItemTypeMapping.Mappings[destType];
+            }
+
+            List<string> conflictComments = BuildEventDeltaConflictComments(eventDelta, targetWorkItem, revision.Number);
+            PopulateWorkItem(currentRevisionWorkItem, targetWorkItem, destType, applyHistoryViaObjectModel: false, fieldFilter: eventDelta.FieldNames);
+
+            DateTime lastSavedDate = targetWorkItem?.ToWorkItem()?.Fields["System.ChangedDate"]?.Value is DateTime d ? d : DateTime.MinValue;
+            if (revision.ChangedDate <= lastSavedDate)
+            {
+                revision.ChangedDate = lastSavedDate.AddSeconds(1);
+            }
+            DateTime nowUtc = DateTime.UtcNow;
+            if (revision.ChangedDate > nowUtc)
+            {
+                revision.ChangedDate = nowUtc;
+            }
+
+            targetWorkItem.ToWorkItem().Fields["System.ChangedDate"].Value = revision.ChangedDate;
+            if (revision.Fields.ContainsKey("System.ChangedBy"))
+            {
+                targetWorkItem.ToWorkItem().Fields["System.ChangedBy"].Value = revision.Fields["System.ChangedBy"].Value.ToString();
+            }
+
+            if (conflictComments.Count > 0)
+            {
+                targetWorkItem.ToWorkItem().Fields["System.History"].Value = string.Join("<br/>", conflictComments);
+            }
+
+            var reflectedUri = (TfsReflectedWorkItemId)Source.WorkItems.CreateReflectedWorkItemId(sourceWorkItem);
+            if (!targetWorkItem.ToWorkItem().Fields.Contains(Target.Options.ReflectedWorkItemIdField))
+            {
+                throw new InvalidOperationException("ReflectedWorkItemIdField Field Missing");
+            }
+            targetWorkItem.ToWorkItem().Fields[Target.Options.ReflectedWorkItemIdField].Value = reflectedUri.ToString();
+
+            ProcessHTMLFieldAttachements(targetWorkItem);
+            ProcessWorkItemEmbeddedLinks(sourceWorkItem, targetWorkItem);
+            CheckClosedDateIsValid(sourceWorkItem, targetWorkItem);
+
+            if (!SkipRevisionWithInvalidIterationPath(targetWorkItem) && !SkipRevisionWithInvalidAreaPath(targetWorkItem))
+            {
+                string historyForFallback = targetWorkItem.ToWorkItem().Fields["System.History"].Value?.ToString();
+                TrySaveOrFallbackComment(targetWorkItem, revision, historyForFallback, ref lastSavedDate);
+            }
+
+            TraceWriteLine(LogEventLevel.Information,
+                " Saved TargetWorkItem {TargetWorkItemId}. Applied event delta revision {RevisionNumber}",
+                new Dictionary<string, object>()
+                {
+                    { "TargetWorkItemId", targetWorkItem.Id },
+                    { "RevisionNumber", revision.Number }
+                });
+
+            return targetWorkItem;
+        }
+
+        private List<string> BuildEventDeltaConflictComments(EventDeltaOptions eventDelta, WorkItemData targetWorkItem, int revisionNumber)
+        {
+            var comments = new List<string>();
+            WorkItem target = targetWorkItem.ToWorkItem();
+            foreach (string fieldName in eventDelta.FieldNames)
+            {
+                if (fieldName == "System.Tags" || !target.Fields.Contains(fieldName) || !EventDeltaHasValue(eventDelta.ChangedFields, fieldName, "oldValue"))
+                {
+                    continue;
+                }
+
+                string expectedOldValue = GetEventDeltaValue(eventDelta.ChangedFields, fieldName, "oldValue");
+                string incomingNewValue = GetEventDeltaValue(eventDelta.ChangedFields, fieldName, "newValue");
+                string currentTargetValue = target.Fields[fieldName].Value?.ToString() ?? "";
+
+                if (IsEventDeltaConflict(expectedOldValue, currentTargetValue, incomingNewValue))
+                {
+                    comments.Add(BuildEventDeltaConflictComment(fieldName, expectedOldValue, currentTargetValue, incomingNewValue, Options.SourceName, revisionNumber));
+                }
+            }
+            return comments;
+        }
+
+        private static bool EventDeltaHasValue(JObject changedFields, string referenceName, string propertyName)
+        {
+            JToken field = changedFields?[referenceName];
+            return field?.Type == JTokenType.Object && field[propertyName] != null && field[propertyName].Type != JTokenType.Null;
         }
 
         private WorkItemData ReplayRevisions(List<RevisionItem> revisionsToMigrate, WorkItemData sourceWorkItem, WorkItemData targetWorkItem)
