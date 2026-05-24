@@ -208,6 +208,8 @@ namespace MigrationTools.Processors.Tests
                 "2",
                 "1",
                 "4",
+                "4",
+                "latest incoming event applied",
                 "src",
                 12
             });
@@ -217,7 +219,25 @@ namespace MigrationTools.Processors.Tests
             StringAssert.Contains(comment, "Expected previous value: 2");
             StringAssert.Contains(comment, "Conflicting target value: 1");
             StringAssert.Contains(comment, "Applied latest value: 4");
-            StringAssert.Contains(comment, "latest event wins");
+            StringAssert.Contains(comment, "Resolution: latest incoming event applied");
+        }
+
+        [TestMethod("TfsWorkItemMigrationProcessorTests_EventDelta_Preserves_Newer_Target_Conflict_Value"), TestCategory("L0")]
+        public void EventDelta_Preserves_Newer_Target_Conflict_Value()
+        {
+            MethodInfo method = typeof(TfsWorkItemMigrationProcessor).GetMethod("ShouldPreserveCurrentTargetConflictValue", BindingFlags.NonPublic | BindingFlags.Static);
+
+            Assert.IsNotNull(method);
+            Assert.IsTrue((bool)method.Invoke(null, new object[]
+            {
+                new DateTime(2026, 5, 24, 15, 1, 57, DateTimeKind.Utc),
+                new DateTime(2026, 5, 24, 15, 2, 9, DateTimeKind.Utc)
+            }));
+            Assert.IsFalse((bool)method.Invoke(null, new object[]
+            {
+                new DateTime(2026, 5, 24, 15, 2, 9, DateTimeKind.Utc),
+                new DateTime(2026, 5, 24, 15, 1, 57, DateTimeKind.Utc)
+            }));
         }
 
     }

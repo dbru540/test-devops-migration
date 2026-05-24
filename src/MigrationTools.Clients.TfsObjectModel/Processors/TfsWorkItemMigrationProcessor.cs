@@ -1278,7 +1278,12 @@ namespace MigrationTools.Processors
             return string.IsNullOrWhiteSpace(value) ? "" : value.Trim();
         }
 
-        private static string BuildEventDeltaConflictComment(string fieldName, string expectedOldValue, string currentTargetValue, string incomingNewValue, string direction, int revisionNumber)
+        private static bool ShouldPreserveCurrentTargetConflictValue(DateTime incomingChangedDate, DateTime currentTargetChangedDate)
+        {
+            return currentTargetChangedDate.ToUniversalTime() > incomingChangedDate.ToUniversalTime();
+        }
+
+        private static string BuildEventDeltaConflictComment(string fieldName, string expectedOldValue, string currentTargetValue, string incomingNewValue, string appliedValue, string resolution, string direction, int revisionNumber)
         {
             return
                 "<span style=\"display:none;\">sync-src:conflict:event-delta</span>" +
@@ -1288,8 +1293,10 @@ namespace MigrationTools.Processors
                 $"Revision: {revisionNumber}<br/>" +
                 $"Expected previous value: {WebUtility.HtmlEncode(expectedOldValue)}<br/>" +
                 $"Conflicting target value: {WebUtility.HtmlEncode(currentTargetValue)}<br/>" +
-                $"Applied latest value: {WebUtility.HtmlEncode(incomingNewValue)}<br/>" +
-                "Rule: latest event wins";
+                $"Incoming value: {WebUtility.HtmlEncode(incomingNewValue)}<br/>" +
+                $"Applied latest value: {WebUtility.HtmlEncode(appliedValue)}<br/>" +
+                $"Resolution: {WebUtility.HtmlEncode(resolution)}<br/>" +
+                "Rule: latest timestamp wins";
         }
 
         // Comments created before this date are considered already synced (or out of scope).
@@ -1878,10 +1885,17 @@ namespace MigrationTools.Processors
                 destType = CommonTools.WorkItemTypeMapping.Mappings[destType];
             }
 
-            List<string> conflictComments = BuildEventDeltaConflictComments(eventDelta, targetWorkItem, revision.Number);
-            PopulateWorkItem(currentRevisionWorkItem, targetWorkItem, destType, applyHistoryViaObjectModel: false, fieldFilter: eventDelta.FieldNames);
-
             DateTime lastSavedDate = targetWorkItem?.ToWorkItem()?.Fields["System.ChangedDate"]?.Value is DateTime d ? d : DateTime.MinValue;
+            var fieldsToSkip = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            List<string> conflictComments = BuildEventDeltaConflictComments(eventDelta, targetWorkItem, revision.Number, revision.ChangedDate, lastSavedDate, fieldsToSkip);
+            var fieldsToApply = new HashSet<string>(eventDelta.FieldNames, StringComparer.OrdinalIgnoreCase);
+            foreach (string fieldName in fieldsToSkip)
+            {
+                fieldsToApply.Remove(fieldName);
+            }
+
+            PopulateWorkItem(currentRevisionWorkItem, targetWorkItem, destType, applyHistoryViaObjectModel: false, fieldFilter: fieldsToApply);
+
             if (revision.ChangedDate <= lastSavedDate)
             {
                 revision.ChangedDate = lastSavedDate.AddSeconds(1);
@@ -1931,7 +1945,7 @@ namespace MigrationTools.Processors
             return targetWorkItem;
         }
 
-        private List<string> BuildEventDeltaConflictComments(EventDeltaOptions eventDelta, WorkItemData targetWorkItem, int revisionNumber)
+        private List<string> BuildEventDeltaConflictComments(EventDeltaOptions eventDelta, WorkItemData targetWorkItem, int revisionNumber, DateTime incomingChangedDate, DateTime currentTargetChangedDate, ICollection<string> fieldsToSkip)
         {
             var comments = new List<string>();
             WorkItem target = targetWorkItem.ToWorkItem();
@@ -1948,7 +1962,14 @@ namespace MigrationTools.Processors
 
                 if (IsEventDeltaConflict(expectedOldValue, currentTargetValue, incomingNewValue))
                 {
-                    comments.Add(BuildEventDeltaConflictComment(fieldName, expectedOldValue, currentTargetValue, incomingNewValue, Options.SourceName, revisionNumber));
+                    bool preserveTargetValue = ShouldPreserveCurrentTargetConflictValue(incomingChangedDate, currentTargetChangedDate);
+                    string appliedValue = preserveTargetValue ? currentTargetValue : incomingNewValue;
+                    string resolution = preserveTargetValue ? "newer target value preserved" : "latest incoming event applied";
+                    if (preserveTargetValue)
+                    {
+                        fieldsToSkip.Add(fieldName);
+                    }
+                    comments.Add(BuildEventDeltaConflictComment(fieldName, expectedOldValue, currentTargetValue, incomingNewValue, appliedValue, resolution, Options.SourceName, revisionNumber));
                 }
             }
             return comments;
