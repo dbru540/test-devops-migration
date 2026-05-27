@@ -1283,6 +1283,26 @@ namespace MigrationTools.Processors
             return currentTargetChangedDate.ToUniversalTime() > incomingChangedDate.ToUniversalTime();
         }
 
+        private static DateTime GetLatestTargetFieldChangedDate(WorkItemData targetWorkItem, string fieldName, DateTime fallbackChangedDate)
+        {
+            if (targetWorkItem?.Revisions == null || string.IsNullOrWhiteSpace(fieldName))
+            {
+                return fallbackChangedDate;
+            }
+
+            foreach (RevisionItem revision in targetWorkItem.Revisions.Values
+                .OrderByDescending(r => r.ChangedDate.ToUniversalTime())
+                .ThenByDescending(r => r.Number))
+            {
+                if (revision?.Fields != null && revision.Fields.ContainsKey(fieldName))
+                {
+                    return revision.ChangedDate;
+                }
+            }
+
+            return fallbackChangedDate;
+        }
+
         private static string BuildEventDeltaConflictComment(string fieldName, string expectedOldValue, string currentTargetValue, string incomingNewValue, string appliedValue, string resolution, string direction, int revisionNumber)
         {
             return
@@ -1951,7 +1971,7 @@ namespace MigrationTools.Processors
             WorkItem target = targetWorkItem.ToWorkItem();
             foreach (string fieldName in eventDelta.FieldNames)
             {
-                if (fieldName == "System.Tags" || !target.Fields.Contains(fieldName) || !EventDeltaHasValue(eventDelta.ChangedFields, fieldName, "oldValue"))
+                if (!target.Fields.Contains(fieldName) || !EventDeltaHasValue(eventDelta.ChangedFields, fieldName, "oldValue"))
                 {
                     continue;
                 }
@@ -1962,7 +1982,8 @@ namespace MigrationTools.Processors
 
                 if (IsEventDeltaConflict(expectedOldValue, currentTargetValue, incomingNewValue))
                 {
-                    bool preserveTargetValue = ShouldPreserveCurrentTargetConflictValue(incomingChangedDate, currentTargetChangedDate);
+                    DateTime currentTargetFieldChangedDate = GetLatestTargetFieldChangedDate(targetWorkItem, fieldName, currentTargetChangedDate);
+                    bool preserveTargetValue = ShouldPreserveCurrentTargetConflictValue(incomingChangedDate, currentTargetFieldChangedDate);
                     string appliedValue = preserveTargetValue ? currentTargetValue : incomingNewValue;
                     string resolution = preserveTargetValue ? "newer target value preserved" : "latest incoming event applied";
                     if (preserveTargetValue)

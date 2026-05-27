@@ -240,5 +240,54 @@ namespace MigrationTools.Processors.Tests
             }));
         }
 
+        [TestMethod("TfsWorkItemMigrationProcessorTests_EventDelta_Field_Changed_Date_Ignores_Unrelated_Later_Revisions"), TestCategory("L0")]
+        public void EventDelta_Field_Changed_Date_Ignores_Unrelated_Later_Revisions()
+        {
+            MethodInfo method = typeof(TfsWorkItemMigrationProcessor).GetMethod("GetLatestTargetFieldChangedDate", BindingFlags.NonPublic | BindingFlags.Static);
+            WorkItemData targetWorkItem = new WorkItemData
+            {
+                Revisions = new SortedDictionary<int, RevisionItem>
+                {
+                    [1] = new RevisionItem
+                    {
+                        Number = 1,
+                        ChangedDate = new DateTime(2026, 5, 25, 6, 0, 0, DateTimeKind.Utc),
+                        Fields = new Dictionary<string, FieldItem>
+                        {
+                            ["System.Description"] = new FieldItem { Value = "<div>baseline</div>" },
+                        },
+                    },
+                    [2] = new RevisionItem
+                    {
+                        Number = 2,
+                        ChangedDate = new DateTime(2026, 5, 25, 6, 16, 0, DateTimeKind.Utc),
+                        Fields = new Dictionary<string, FieldItem>
+                        {
+                            ["System.Description"] = new FieldItem { Value = "<div>source wave</div>" },
+                        },
+                    },
+                    [3] = new RevisionItem
+                    {
+                        Number = 3,
+                        ChangedDate = new DateTime(2026, 5, 25, 6, 18, 0, DateTimeKind.Utc),
+                        Fields = new Dictionary<string, FieldItem>
+                        {
+                            ["System.History"] = new FieldItem { Value = "<div>later comment</div>" },
+                        },
+                    },
+                },
+            };
+
+            Assert.IsNotNull(method);
+            DateTime fieldChangedDate = (DateTime)method.Invoke(null, new object[]
+            {
+                targetWorkItem,
+                "System.Description",
+                new DateTime(2026, 5, 25, 6, 18, 0, DateTimeKind.Utc)
+            });
+
+            Assert.AreEqual(new DateTime(2026, 5, 25, 6, 16, 0, DateTimeKind.Utc), fieldChangedDate);
+        }
+
     }
 }
