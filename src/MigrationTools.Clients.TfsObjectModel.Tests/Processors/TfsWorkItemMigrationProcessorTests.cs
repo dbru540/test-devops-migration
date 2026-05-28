@@ -289,5 +289,16 @@ namespace MigrationTools.Processors.Tests
             Assert.AreEqual(new DateTime(2026, 5, 25, 6, 16, 0, DateTimeKind.Utc), fieldChangedDate);
         }
 
+        [TestMethod("TfsWorkItemMigrationProcessorTests_Normal_Api_Comment_Sync_Does_Not_Post_Monitoring_Alert"), TestCategory("L0")]
+        public void Normal_Api_Comment_Sync_Does_Not_Post_Monitoring_Alert()
+        {
+            MethodInfo method = typeof(TfsWorkItemMigrationProcessor).GetMethod("ShouldPostCommentSyncActivityToMonitoringWi", BindingFlags.NonPublic | BindingFlags.Static);
+
+            Assert.IsNotNull(method);
+            Assert.IsFalse((bool)method.Invoke(null, new object[] { 1, 0 }));
+            Assert.IsFalse((bool)method.Invoke(null, new object[] { 0, 1 }));
+            Assert.IsFalse((bool)method.Invoke(null, new object[] { 2, 3 }));
+        }
+
     }
 }

@@ -1147,6 +1147,12 @@ namespace MigrationTools.Processors
             return revision.Fields.Keys.Any(referenceName => IsObjectModelReplayField(referenceName, ignoredFields));
         }
 
+        private static bool ShouldPostCommentSyncActivityToMonitoringWi(int missingCount, int modifiedCount)
+        {
+            // API-owned comment sync is expected behavior; the monitoring WI is reserved for anomalies.
+            return false;
+        }
+
         private sealed class EventDeltaOptions
         {
             public int? RevisionNumber { get; set; }
@@ -1543,7 +1549,7 @@ namespace MigrationTools.Processors
                 TraceWriteLine(LogEventLevel.Information, "Comment sync: {MissingCount} posted, {ModifiedCount} updated on {TargetWorkItemId}",
                     new Dictionary<string, object>() { { "MissingCount", missing.Count }, { "ModifiedCount", modified.Count }, { "TargetWorkItemId", targetWorkItem.Id } });
 
-                if (totalActions > 0)
+                if (totalActions > 0 && ShouldPostCommentSyncActivityToMonitoringWi(missing.Count, modified.Count))
                 {
                     string alertAction = missing.Count > 0 && modified.Count > 0
                         ? $"Posted {missing.Count} + Updated {modified.Count}"
