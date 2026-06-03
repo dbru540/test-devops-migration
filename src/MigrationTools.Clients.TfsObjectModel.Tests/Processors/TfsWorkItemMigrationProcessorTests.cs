@@ -164,7 +164,7 @@ namespace MigrationTools.Processors.Tests
             Assert.IsNotNull(method);
             var fields = (ICollection<string>)method.Invoke(null, new object[]
             {
-                "{\"System.Title\":{\"oldValue\":\"A\",\"newValue\":\"B\"},\"System.History\":{\"newValue\":\"comment\"},\"Microsoft.VSTS.Common.Priority\":{\"oldValue\":2,\"newValue\":4}}"
+                "{\"System.Title\":{\"oldValue\":\"A\",\"newValue\":\"B\"},\"System.History\":{\"newValue\":\"comment\"},\"System.CreatedDate\":{\"oldValue\":\"2026-05-27T16:21:12Z\",\"newValue\":\"2026-05-28T15:00:52Z\"},\"Microsoft.VSTS.Common.StateChangeDate\":{\"oldValue\":\"2026-05-28T15:00:52Z\",\"newValue\":\"2026-06-01T09:09:15Z\"},\"Microsoft.VSTS.Common.ActivatedDate\":{\"oldValue\":\"2026-05-28T15:00:52Z\",\"newValue\":\"2026-06-01T09:09:15Z\"},\"Microsoft.VSTS.Common.ResolvedDate\":{\"oldValue\":\"2026-05-28T15:00:52Z\",\"newValue\":\"2026-06-01T09:09:15Z\"},\"Microsoft.VSTS.Common.ClosedDate\":{\"oldValue\":\"2026-05-28T15:00:52Z\",\"newValue\":\"2026-06-01T09:09:15Z\"},\"Microsoft.VSTS.Common.Priority\":{\"oldValue\":2,\"newValue\":4}}"
             });
 
             CollectionAssert.AreEquivalent(

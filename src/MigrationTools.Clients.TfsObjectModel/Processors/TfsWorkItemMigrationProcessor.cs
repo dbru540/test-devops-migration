@@ -1237,6 +1237,7 @@ namespace MigrationTools.Processors
             if (string.IsNullOrWhiteSpace(referenceName)) return false;
             if (referenceName == "System.History") return false;
             if (referenceName == "System.Rev") return false;
+            if (referenceName == "System.CreatedDate") return false;
             if (referenceName == "System.ChangedBy") return false;
             if (referenceName == "System.ChangedDate") return false;
             if (referenceName == "System.AuthorizedAs") return false;
@@ -1244,6 +1245,11 @@ namespace MigrationTools.Processors
             if (referenceName == "System.RevisedDate") return false;
             if (referenceName == "System.Watermark") return false;
             if (referenceName == "System.CommentCount") return false;
+            if (referenceName == "Microsoft.VSTS.Common.StateChangeDate") return false;
+            if (referenceName == "Microsoft.VSTS.Common.ActivatedDate") return false;
+            if (referenceName == "Microsoft.VSTS.Common.ResolvedDate") return false;
+            if (referenceName == "Microsoft.VSTS.Common.ClosedDate") return false;
+            if (referenceName == "System.ClosedDate") return false;
             return true;
         }
 
