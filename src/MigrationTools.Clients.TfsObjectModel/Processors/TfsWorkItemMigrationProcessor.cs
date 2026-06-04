@@ -461,34 +461,38 @@ namespace MigrationTools.Processors
             }
         }
 
+        private static readonly string[] ObjectModelIgnoredFieldNames =
+        {
+            "System.Rev",
+            "System.AreaId",
+            "System.IterationId",
+            "System.Id",
+            "System.Parent",
+            "System.RevisedDate",
+            "System.AuthorizedAs",
+            "System.AttachedFileCount",
+            "System.TeamProject",
+            "System.NodeName",
+            "System.RelatedLinkCount",
+            "System.WorkItemType",
+            "Microsoft.VSTS.Common.StateChangeDate",
+            "System.ExternalLinkCount",
+            "System.HyperLinkCount",
+            "System.Watermark",
+            "System.AuthorizedDate",
+            "System.BoardColumn",
+            "System.BoardColumnDone",
+            "System.BoardLane",
+            "SLB.SWT.DateOfClientFeedback",
+            "System.CommentCount",
+            "System.RemoteLinkCount"
+        };
+
+        private static readonly HashSet<string> ObjectModelIgnoredFields = new HashSet<string>(ObjectModelIgnoredFieldNames, StringComparer.OrdinalIgnoreCase);
+
         private void PopulateIgnoreList()
         {
-            _ignore = new List<string>
-            {
-                "System.Rev",
-                "System.AreaId",
-                "System.IterationId",
-                "System.Id",
-                "System.Parent",
-                "System.RevisedDate",
-                "System.AuthorizedAs",
-                "System.AttachedFileCount",
-                "System.TeamProject",
-                "System.NodeName",
-                "System.RelatedLinkCount",
-                "System.WorkItemType",
-                "Microsoft.VSTS.Common.StateChangeDate",
-                "System.ExternalLinkCount",
-                "System.HyperLinkCount",
-                "System.Watermark",
-                "System.AuthorizedDate",
-                "System.BoardColumn",
-                "System.BoardColumnDone",
-                "System.BoardLane",
-                "SLB.SWT.DateOfClientFeedback",
-                "System.CommentCount",
-                "System.RemoteLinkCount"
-            };
+            _ignore = ObjectModelIgnoredFieldNames.ToList();
         }
 
         // TODO : Make this into the Work Item mapping tool
@@ -1235,17 +1239,11 @@ namespace MigrationTools.Processors
         private static bool IsEventDeltaReplayField(string referenceName)
         {
             if (string.IsNullOrWhiteSpace(referenceName)) return false;
+            if (ObjectModelIgnoredFields.Contains(referenceName)) return false;
             if (referenceName == "System.History") return false;
-            if (referenceName == "System.Rev") return false;
             if (referenceName == "System.CreatedDate") return false;
             if (referenceName == "System.ChangedBy") return false;
             if (referenceName == "System.ChangedDate") return false;
-            if (referenceName == "System.AuthorizedAs") return false;
-            if (referenceName == "System.AuthorizedDate") return false;
-            if (referenceName == "System.RevisedDate") return false;
-            if (referenceName == "System.Watermark") return false;
-            if (referenceName == "System.CommentCount") return false;
-            if (referenceName == "Microsoft.VSTS.Common.StateChangeDate") return false;
             if (referenceName == "Microsoft.VSTS.Common.ActivatedDate") return false;
             if (referenceName == "Microsoft.VSTS.Common.ResolvedDate") return false;
             if (referenceName == "Microsoft.VSTS.Common.ClosedDate") return false;
