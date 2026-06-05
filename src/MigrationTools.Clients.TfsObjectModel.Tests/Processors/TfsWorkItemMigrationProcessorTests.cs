@@ -164,7 +164,7 @@ namespace MigrationTools.Processors.Tests
             Assert.IsNotNull(method);
             var fields = (ICollection<string>)method.Invoke(null, new object[]
             {
-                "{\"System.Title\":{\"oldValue\":\"A\",\"newValue\":\"B\"},\"System.History\":{\"newValue\":\"comment\"},\"System.CreatedDate\":{\"oldValue\":\"2026-05-27T16:21:12Z\",\"newValue\":\"2026-05-28T15:00:52Z\"},\"Microsoft.VSTS.Common.StateChangeDate\":{\"oldValue\":\"2026-05-28T15:00:52Z\",\"newValue\":\"2026-06-01T09:09:15Z\"},\"Microsoft.VSTS.Common.ActivatedDate\":{\"oldValue\":\"2026-05-28T15:00:52Z\",\"newValue\":\"2026-06-01T09:09:15Z\"},\"Microsoft.VSTS.Common.ResolvedDate\":{\"oldValue\":\"2026-05-28T15:00:52Z\",\"newValue\":\"2026-06-01T09:09:15Z\"},\"Microsoft.VSTS.Common.ClosedDate\":{\"oldValue\":\"2026-05-28T15:00:52Z\",\"newValue\":\"2026-06-01T09:09:15Z\"},\"System.AreaId\":{\"oldValue\":1,\"newValue\":2},\"System.IterationId\":{\"oldValue\":1,\"newValue\":2},\"System.Id\":{\"oldValue\":1,\"newValue\":2},\"System.Parent\":{\"oldValue\":1,\"newValue\":2},\"System.AttachedFileCount\":{\"oldValue\":0,\"newValue\":1},\"System.TeamProject\":{\"oldValue\":\"A\",\"newValue\":\"B\"},\"System.NodeName\":{\"oldValue\":\"A\",\"newValue\":\"B\"},\"System.RelatedLinkCount\":{\"oldValue\":0,\"newValue\":1},\"System.WorkItemType\":{\"oldValue\":\"Task\",\"newValue\":\"Bug\"},\"System.ExternalLinkCount\":{\"oldValue\":0,\"newValue\":1},\"System.HyperLinkCount\":{\"oldValue\":0,\"newValue\":1},\"System.BoardColumn\":{\"oldValue\":\"New\",\"newValue\":\"Active\"},\"System.BoardColumnDone\":{\"oldValue\":false,\"newValue\":true},\"System.BoardLane\":{\"oldValue\":\"Default\",\"newValue\":\"Expedite\"},\"SLB.SWT.DateOfClientFeedback\":{\"oldValue\":\"2026-05-28T15:00:52Z\",\"newValue\":\"2026-06-01T09:09:15Z\"},\"System.RemoteLinkCount\":{\"oldValue\":0,\"newValue\":1},\"Microsoft.VSTS.Common.Priority\":{\"oldValue\":2,\"newValue\":4}}"
+                "{\"System.Title\":{\"oldValue\":\"A\",\"newValue\":\"B\"},\"System.History\":{\"newValue\":\"comment\"},\"System.CreatedBy\":{\"oldValue\":\"A\",\"newValue\":\"B\"},\"System.CreatedDate\":{\"oldValue\":\"2026-05-27T16:21:12Z\",\"newValue\":\"2026-05-28T15:00:52Z\"},\"System.PersonId\":{\"oldValue\":1,\"newValue\":2},\"Microsoft.VSTS.Common.StateChangeDate\":{\"oldValue\":\"2026-05-28T15:00:52Z\",\"newValue\":\"2026-06-01T09:09:15Z\"},\"Microsoft.VSTS.Common.ActivatedDate\":{\"oldValue\":\"2026-05-28T15:00:52Z\",\"newValue\":\"2026-06-01T09:09:15Z\"},\"Microsoft.VSTS.Common.ActivatedBy\":{\"oldValue\":\"A\",\"newValue\":\"B\"},\"Microsoft.VSTS.Common.ResolvedDate\":{\"oldValue\":\"2026-05-28T15:00:52Z\",\"newValue\":\"2026-06-01T09:09:15Z\"},\"Microsoft.VSTS.Common.ResolvedBy\":{\"oldValue\":\"A\",\"newValue\":\"B\"},\"Microsoft.VSTS.Common.ClosedDate\":{\"oldValue\":\"2026-05-28T15:00:52Z\",\"newValue\":\"2026-06-01T09:09:15Z\"},\"Microsoft.VSTS.Common.ClosedBy\":{\"oldValue\":\"A\",\"newValue\":\"B\"},\"System.AreaId\":{\"oldValue\":1,\"newValue\":2},\"System.IterationId\":{\"oldValue\":1,\"newValue\":2},\"System.Id\":{\"oldValue\":1,\"newValue\":2},\"System.Parent\":{\"oldValue\":1,\"newValue\":2},\"System.AttachedFileCount\":{\"oldValue\":0,\"newValue\":1},\"System.TeamProject\":{\"oldValue\":\"A\",\"newValue\":\"B\"},\"System.NodeName\":{\"oldValue\":\"A\",\"newValue\":\"B\"},\"System.RelatedLinkCount\":{\"oldValue\":0,\"newValue\":1},\"System.WorkItemType\":{\"oldValue\":\"Task\",\"newValue\":\"Bug\"},\"System.ExternalLinkCount\":{\"oldValue\":0,\"newValue\":1},\"System.HyperLinkCount\":{\"oldValue\":0,\"newValue\":1},\"System.BoardColumn\":{\"oldValue\":\"New\",\"newValue\":\"Active\"},\"System.BoardColumnDone\":{\"oldValue\":false,\"newValue\":true},\"System.BoardLane\":{\"oldValue\":\"Default\",\"newValue\":\"Expedite\"},\"SLB.SWT.DateOfClientFeedback\":{\"oldValue\":\"2026-05-28T15:00:52Z\",\"newValue\":\"2026-06-01T09:09:15Z\"},\"System.RemoteLinkCount\":{\"oldValue\":0,\"newValue\":1},\"Microsoft.VSTS.Common.Priority\":{\"oldValue\":2,\"newValue\":4}}"
             });
 
             CollectionAssert.AreEquivalent(
@@ -181,6 +181,20 @@ namespace MigrationTools.Processors.Tests
             var fields = (ICollection<string>)method.Invoke(null, new object[]
             {
                 "{\"System.BoardColumn\":{\"oldValue\":\"New\",\"newValue\":\"Active\"},\"System.BoardColumnDone\":{\"oldValue\":false,\"newValue\":true},\"System.BoardLane\":{\"oldValue\":\"Default\",\"newValue\":\"Expedite\"},\"System.RelatedLinkCount\":{\"oldValue\":0,\"newValue\":1},\"System.RemoteLinkCount\":{\"oldValue\":0,\"newValue\":1}}"
+            });
+
+            Assert.AreEqual(0, fields.Count);
+        }
+
+        [TestMethod("TfsWorkItemMigrationProcessorTests_EventDelta_Drops_System_Managed_Workflow_Fields"), TestCategory("L0")]
+        public void EventDelta_Drops_System_Managed_Workflow_Fields()
+        {
+            MethodInfo method = typeof(TfsWorkItemMigrationProcessor).GetMethod("GetEventDeltaFieldNames", BindingFlags.NonPublic | BindingFlags.Static);
+
+            Assert.IsNotNull(method);
+            var fields = (ICollection<string>)method.Invoke(null, new object[]
+            {
+                "{\"System.CreatedBy\":{\"oldValue\":\"A\",\"newValue\":\"B\"},\"System.PersonId\":{\"oldValue\":1,\"newValue\":2},\"Microsoft.VSTS.Common.ActivatedBy\":{\"oldValue\":\"A\",\"newValue\":\"B\"},\"Microsoft.VSTS.Common.ResolvedBy\":{\"oldValue\":\"A\",\"newValue\":\"B\"},\"Microsoft.VSTS.Common.ClosedBy\":{\"oldValue\":\"A\",\"newValue\":\"B\"}}"
             });
 
             Assert.AreEqual(0, fields.Count);
@@ -225,7 +239,9 @@ namespace MigrationTools.Processors.Tests
                 "4",
                 "latest incoming event applied",
                 "src",
-                12
+                12,
+                new DateTime(2026, 6, 5, 7, 15, 42, 910, DateTimeKind.Utc),
+                new DateTime(2026, 6, 5, 7, 17, 55, 147, DateTimeKind.Utc)
             });
 
             StringAssert.Contains(comment, "Sync conflict resolved");
@@ -234,6 +250,9 @@ namespace MigrationTools.Processors.Tests
             StringAssert.Contains(comment, "Conflicting target value: 1");
             StringAssert.Contains(comment, "Applied latest value: 4");
             StringAssert.Contains(comment, "Resolution: latest incoming event applied");
+            StringAssert.Contains(comment, "Incoming changed date: 2026-06-05T07:15:42.9100000Z");
+            StringAssert.Contains(comment, "Target field changed date: 2026-06-05T07:17:55.1470000Z");
+            StringAssert.Contains(comment, "Rule: latest timestamp wins");
         }
 
         [TestMethod("TfsWorkItemMigrationProcessorTests_EventDelta_Preserves_Newer_Target_Conflict_Value"), TestCategory("L0")]

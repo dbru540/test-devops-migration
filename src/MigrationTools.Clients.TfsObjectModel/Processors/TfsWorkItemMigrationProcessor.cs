@@ -489,6 +489,22 @@ namespace MigrationTools.Processors
         };
 
         private static readonly HashSet<string> ObjectModelIgnoredFields = new HashSet<string>(ObjectModelIgnoredFieldNames, StringComparer.OrdinalIgnoreCase);
+        private static readonly HashSet<string> EventDeltaSystemManagedFields = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "System.History",
+            "System.CreatedBy",
+            "System.CreatedDate",
+            "System.ChangedBy",
+            "System.ChangedDate",
+            "System.PersonId",
+            "Microsoft.VSTS.Common.ActivatedDate",
+            "Microsoft.VSTS.Common.ActivatedBy",
+            "Microsoft.VSTS.Common.ResolvedDate",
+            "Microsoft.VSTS.Common.ResolvedBy",
+            "Microsoft.VSTS.Common.ClosedDate",
+            "Microsoft.VSTS.Common.ClosedBy",
+            "System.ClosedDate"
+        };
 
         private void PopulateIgnoreList()
         {
@@ -1240,14 +1256,7 @@ namespace MigrationTools.Processors
         {
             if (string.IsNullOrWhiteSpace(referenceName)) return false;
             if (ObjectModelIgnoredFields.Contains(referenceName)) return false;
-            if (referenceName == "System.History") return false;
-            if (referenceName == "System.CreatedDate") return false;
-            if (referenceName == "System.ChangedBy") return false;
-            if (referenceName == "System.ChangedDate") return false;
-            if (referenceName == "Microsoft.VSTS.Common.ActivatedDate") return false;
-            if (referenceName == "Microsoft.VSTS.Common.ResolvedDate") return false;
-            if (referenceName == "Microsoft.VSTS.Common.ClosedDate") return false;
-            if (referenceName == "System.ClosedDate") return false;
+            if (EventDeltaSystemManagedFields.Contains(referenceName)) return false;
             return true;
         }
 
@@ -1313,8 +1322,11 @@ namespace MigrationTools.Processors
             return fallbackChangedDate;
         }
 
-        private static string BuildEventDeltaConflictComment(string fieldName, string expectedOldValue, string currentTargetValue, string incomingNewValue, string appliedValue, string resolution, string direction, int revisionNumber)
+        private static string BuildEventDeltaConflictComment(string fieldName, string expectedOldValue, string currentTargetValue, string incomingNewValue, string appliedValue, string resolution, string direction, int revisionNumber, DateTime incomingChangedDate, DateTime currentTargetFieldChangedDate)
         {
+            string incomingChangedDateText = incomingChangedDate.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture);
+            string targetFieldChangedDateText = currentTargetFieldChangedDate.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture);
+
             return
                 "<span style=\"display:none;\">sync-src:conflict:event-delta</span>" +
                 "<b>[Sync conflict resolved]</b><br/>" +
@@ -1325,6 +1337,8 @@ namespace MigrationTools.Processors
                 $"Conflicting target value: {WebUtility.HtmlEncode(currentTargetValue)}<br/>" +
                 $"Incoming value: {WebUtility.HtmlEncode(incomingNewValue)}<br/>" +
                 $"Applied latest value: {WebUtility.HtmlEncode(appliedValue)}<br/>" +
+                $"Incoming changed date: {incomingChangedDateText}<br/>" +
+                $"Target field changed date: {targetFieldChangedDateText}<br/>" +
                 $"Resolution: {WebUtility.HtmlEncode(resolution)}<br/>" +
                 "Rule: latest timestamp wins";
         }
@@ -2000,7 +2014,7 @@ namespace MigrationTools.Processors
                     {
                         fieldsToSkip.Add(fieldName);
                     }
-                    comments.Add(BuildEventDeltaConflictComment(fieldName, expectedOldValue, currentTargetValue, incomingNewValue, appliedValue, resolution, Options.SourceName, revisionNumber));
+                    comments.Add(BuildEventDeltaConflictComment(fieldName, expectedOldValue, currentTargetValue, incomingNewValue, appliedValue, resolution, Options.SourceName, revisionNumber, incomingChangedDate, currentTargetFieldChangedDate));
                 }
             }
             return comments;
