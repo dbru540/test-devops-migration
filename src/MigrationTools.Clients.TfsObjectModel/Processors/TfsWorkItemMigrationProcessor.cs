@@ -7,6 +7,7 @@ using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Newtonsoft.Json.Linq;
 using Microsoft.Extensions.DependencyInjection;
@@ -505,6 +506,17 @@ namespace MigrationTools.Processors
             "Microsoft.VSTS.Common.ClosedBy",
             "System.ClosedDate"
         };
+        private static readonly HashSet<string> EventDeltaIdentityFields = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "System.AssignedTo",
+            "System.ChangedBy",
+            "System.CreatedBy",
+            "Microsoft.VSTS.Common.ActivatedBy",
+            "Microsoft.VSTS.Common.ResolvedBy",
+            "Microsoft.VSTS.Common.ClosedBy"
+        };
+        private static readonly Regex IdentityEmailRegex = new Regex("<(?<email>[A-Z0-9._%+\\-']+@[A-Z0-9.\\-]+\\.[A-Z]{2,})>", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        private static readonly Regex BareEmailRegex = new Regex("(?<email>[A-Z0-9._%+\\-']+@[A-Z0-9.\\-]+\\.[A-Z]{2,})", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
         private void PopulateIgnoreList()
         {
@@ -1275,11 +1287,11 @@ namespace MigrationTools.Processors
             return propertyName == "newValue" ? field.ToString() : "";
         }
 
-        private static bool IsEventDeltaConflict(string expectedOldValue, string currentTargetValue, string incomingNewValue)
+        private static bool IsEventDeltaConflict(string fieldName, string expectedOldValue, string currentTargetValue, string incomingNewValue)
         {
-            string expected = NormalizeConflictValue(expectedOldValue);
-            string current = NormalizeConflictValue(currentTargetValue);
-            string incoming = NormalizeConflictValue(incomingNewValue);
+            string expected = NormalizeConflictValue(fieldName, expectedOldValue, incomingNewValue);
+            string current = NormalizeConflictValue(fieldName, currentTargetValue, incomingNewValue);
+            string incoming = NormalizeConflictValue(fieldName, incomingNewValue, currentTargetValue);
 
             if (string.Equals(current, expected, StringComparison.Ordinal))
             {
@@ -1295,6 +1307,59 @@ namespace MigrationTools.Processors
         private static string NormalizeConflictValue(string value)
         {
             return string.IsNullOrWhiteSpace(value) ? "" : value.Trim();
+        }
+
+        private static string NormalizeConflictValue(string fieldName, string value, string relatedIdentityValue)
+        {
+            if (EventDeltaIdentityFields.Contains(fieldName))
+            {
+                return NormalizeIdentityConflictValue(value, relatedIdentityValue);
+            }
+            return NormalizeConflictValue(value);
+        }
+
+        private static string NormalizeIdentityConflictValue(string value, string relatedIdentityValue)
+        {
+            string normalizedValue = NormalizeConflictValue(value);
+            string email = ExtractIdentityEmail(normalizedValue);
+            if (!string.IsNullOrEmpty(email))
+            {
+                return email;
+            }
+
+            string relatedEmail = ExtractIdentityEmail(relatedIdentityValue);
+            if (!string.IsNullOrEmpty(relatedEmail) && IdentityDisplayNamesMatch(normalizedValue, relatedIdentityValue))
+            {
+                return relatedEmail;
+            }
+
+            return normalizedValue.ToLowerInvariant();
+        }
+
+        private static string ExtractIdentityEmail(string value)
+        {
+            string normalizedValue = NormalizeConflictValue(value);
+            Match match = IdentityEmailRegex.Match(normalizedValue);
+            if (!match.Success)
+            {
+                match = BareEmailRegex.Match(normalizedValue);
+            }
+            return match.Success ? match.Groups["email"].Value.ToLowerInvariant() : "";
+        }
+
+        private static bool IdentityDisplayNamesMatch(string value, string relatedIdentityValue)
+        {
+            string displayName = NormalizeIdentityDisplayName(value);
+            string relatedDisplayName = NormalizeIdentityDisplayName(relatedIdentityValue);
+            return !string.IsNullOrEmpty(displayName) &&
+                   string.Equals(displayName, relatedDisplayName, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string NormalizeIdentityDisplayName(string value)
+        {
+            string normalizedValue = NormalizeConflictValue(value);
+            string withoutEmail = IdentityEmailRegex.Replace(normalizedValue, "");
+            return withoutEmail.Trim();
         }
 
         private static bool ShouldPreserveCurrentTargetConflictValue(DateTime incomingChangedDate, DateTime currentTargetChangedDate)
@@ -2004,7 +2069,7 @@ namespace MigrationTools.Processors
                 string incomingNewValue = GetEventDeltaValue(eventDelta.ChangedFields, fieldName, "newValue");
                 string currentTargetValue = target.Fields[fieldName].Value?.ToString() ?? "";
 
-                if (IsEventDeltaConflict(expectedOldValue, currentTargetValue, incomingNewValue))
+                if (IsEventDeltaConflict(fieldName, expectedOldValue, currentTargetValue, incomingNewValue))
                 {
                     DateTime currentTargetFieldChangedDate = GetLatestTargetFieldChangedDate(targetWorkItem, fieldName, currentTargetChangedDate);
                     bool preserveTargetValue = ShouldPreserveCurrentTargetConflictValue(incomingChangedDate, currentTargetFieldChangedDate);

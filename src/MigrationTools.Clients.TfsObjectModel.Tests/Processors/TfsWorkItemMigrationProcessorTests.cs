@@ -219,9 +219,31 @@ namespace MigrationTools.Processors.Tests
             MethodInfo method = typeof(TfsWorkItemMigrationProcessor).GetMethod("IsEventDeltaConflict", BindingFlags.NonPublic | BindingFlags.Static);
 
             Assert.IsNotNull(method);
-            Assert.IsFalse((bool)method.Invoke(null, new object[] { "2", "2", "4" }));
-            Assert.IsFalse((bool)method.Invoke(null, new object[] { "2", "4", "4" }));
-            Assert.IsTrue((bool)method.Invoke(null, new object[] { "2", "1", "4" }));
+            Assert.IsFalse((bool)method.Invoke(null, new object[] { "Microsoft.VSTS.Common.Priority", "2", "2", "4" }));
+            Assert.IsFalse((bool)method.Invoke(null, new object[] { "Microsoft.VSTS.Common.Priority", "2", "4", "4" }));
+            Assert.IsTrue((bool)method.Invoke(null, new object[] { "Microsoft.VSTS.Common.Priority", "2", "1", "4" }));
+        }
+
+        [TestMethod("TfsWorkItemMigrationProcessorTests_EventDelta_Identity_Conflict_Uses_Email_Only"), TestCategory("L0")]
+        public void EventDelta_Identity_Conflict_Uses_Email_Only()
+        {
+            MethodInfo method = typeof(TfsWorkItemMigrationProcessor).GetMethod("IsEventDeltaConflict", BindingFlags.NonPublic | BindingFlags.Static);
+
+            Assert.IsNotNull(method);
+            Assert.IsFalse((bool)method.Invoke(null, new object[]
+            {
+                "System.AssignedTo",
+                "svc-msflow <svc-msflow@fiveforty.fr>",
+                "FAVRE, ELODIE",
+                "FAVRE, ELODIE <elodie.favre@cityzmedia.fr>"
+            }));
+            Assert.IsTrue((bool)method.Invoke(null, new object[]
+            {
+                "System.AssignedTo",
+                "svc-msflow <svc-msflow@fiveforty.fr>",
+                "Lionel Descamps <ldescamps@fiveforty.fr>",
+                "FAVRE, ELODIE <elodie.favre@cityzmedia.fr>"
+            }));
         }
 
         [TestMethod("TfsWorkItemMigrationProcessorTests_EventDelta_Builds_Conflict_Comment"), TestCategory("L0")]
