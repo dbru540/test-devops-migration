@@ -246,6 +246,39 @@ namespace MigrationTools.Processors.Tests
             }));
         }
 
+        [TestMethod("TfsWorkItemMigrationProcessorTests_EventDelta_Preserves_AssignedTo_When_Absent_From_Delta"), TestCategory("L0")]
+        public void EventDelta_Preserves_AssignedTo_When_Absent_From_Delta()
+        {
+            MethodInfo method = typeof(TfsWorkItemMigrationProcessor).GetMethod("GetEventDeltaRuleSideEffectFieldsToPreserve", BindingFlags.NonPublic | BindingFlags.Static);
+            var fieldsToApply = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                "System.State",
+                "System.Reason",
+                "Microsoft.VSTS.Scheduling.TargetDate",
+            };
+
+            Assert.IsNotNull(method);
+            var fieldsToPreserve = (ICollection<string>)method.Invoke(null, new object[] { fieldsToApply });
+
+            CollectionAssert.Contains(fieldsToPreserve.ToArray(), "System.AssignedTo");
+        }
+
+        [TestMethod("TfsWorkItemMigrationProcessorTests_EventDelta_Does_Not_Preserve_AssignedTo_When_Present_In_Delta"), TestCategory("L0")]
+        public void EventDelta_Does_Not_Preserve_AssignedTo_When_Present_In_Delta()
+        {
+            MethodInfo method = typeof(TfsWorkItemMigrationProcessor).GetMethod("GetEventDeltaRuleSideEffectFieldsToPreserve", BindingFlags.NonPublic | BindingFlags.Static);
+            var fieldsToApply = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                "System.State",
+                "System.AssignedTo",
+            };
+
+            Assert.IsNotNull(method);
+            var fieldsToPreserve = (ICollection<string>)method.Invoke(null, new object[] { fieldsToApply });
+
+            CollectionAssert.DoesNotContain(fieldsToPreserve.ToArray(), "System.AssignedTo");
+        }
+
         [TestMethod("TfsWorkItemMigrationProcessorTests_EventDelta_Builds_Conflict_Comment"), TestCategory("L0")]
         public void EventDelta_Builds_Conflict_Comment()
         {

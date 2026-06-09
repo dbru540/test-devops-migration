@@ -515,6 +515,10 @@ namespace MigrationTools.Processors
             "Microsoft.VSTS.Common.ResolvedBy",
             "Microsoft.VSTS.Common.ClosedBy"
         };
+        private static readonly HashSet<string> EventDeltaRuleSideEffectFields = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "System.AssignedTo"
+        };
         private static readonly Regex IdentityEmailRegex = new Regex("<(?<email>[A-Z0-9._%+\\-']+@[A-Z0-9.\\-]+\\.[A-Z]{2,})>", RegexOptions.IgnoreCase | RegexOptions.Compiled);
         private static readonly Regex BareEmailRegex = new Regex("(?<email>[A-Z0-9._%+\\-']+@[A-Z0-9.\\-]+\\.[A-Z]{2,})", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
@@ -1272,6 +1276,63 @@ namespace MigrationTools.Processors
             return true;
         }
 
+        private static ICollection<string> GetEventDeltaRuleSideEffectFieldsToPreserve(ICollection<string> fieldsToApply)
+        {
+            var fieldsToPreserve = new List<string>();
+            foreach (string fieldName in EventDeltaRuleSideEffectFields)
+            {
+                if (fieldsToApply == null || !fieldsToApply.Contains(fieldName))
+                {
+                    fieldsToPreserve.Add(fieldName);
+                }
+            }
+            return fieldsToPreserve;
+        }
+
+        private Dictionary<string, object> CaptureEventDeltaRuleSideEffectValues(WorkItem targetWorkItem, ICollection<string> fieldsToApply)
+        {
+            var capturedValues = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+            foreach (string fieldName in GetEventDeltaRuleSideEffectFieldsToPreserve(fieldsToApply))
+            {
+                if (targetWorkItem.Fields.Contains(fieldName))
+                {
+                    capturedValues[fieldName] = targetWorkItem.Fields[fieldName].Value;
+                }
+            }
+            return capturedValues;
+        }
+
+        private void RestoreEventDeltaRuleSideEffectValues(WorkItem targetWorkItem, IDictionary<string, object> capturedValues)
+        {
+            foreach (KeyValuePair<string, object> capturedValue in capturedValues)
+            {
+                if (!targetWorkItem.Fields.Contains(capturedValue.Key))
+                {
+                    continue;
+                }
+
+                Field field = targetWorkItem.Fields[capturedValue.Key];
+                string currentValue = field.Value?.ToString() ?? "";
+                string originalValue = capturedValue.Value?.ToString() ?? "";
+                if (string.Equals(currentValue, originalValue, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+                if (!field.IsEditable)
+                {
+                    TraceWriteLine(LogEventLevel.Warning,
+                        " Event delta could not preserve {FieldName}: field is not editable after rule side effect",
+                        new Dictionary<string, object>() { { "FieldName", capturedValue.Key } });
+                    continue;
+                }
+
+                field.Value = capturedValue.Value;
+                TraceWriteLine(LogEventLevel.Information,
+                    " Event delta preserved {FieldName} because it was absent from changed fields",
+                    new Dictionary<string, object>() { { "FieldName", capturedValue.Key } });
+            }
+        }
+
         private static string GetEventDeltaValue(JObject changedFields, string referenceName, string propertyName)
         {
             JToken field = changedFields?[referenceName];
@@ -2003,6 +2064,7 @@ namespace MigrationTools.Processors
                 fieldsToApply.Remove(fieldName);
             }
 
+            Dictionary<string, object> ruleSideEffectValues = CaptureEventDeltaRuleSideEffectValues(targetWorkItem.ToWorkItem(), fieldsToApply);
             PopulateWorkItem(currentRevisionWorkItem, targetWorkItem, destType, applyHistoryViaObjectModel: false, fieldFilter: fieldsToApply);
 
             if (revision.ChangedDate <= lastSavedDate)
@@ -2036,6 +2098,7 @@ namespace MigrationTools.Processors
             ProcessHTMLFieldAttachements(targetWorkItem);
             ProcessWorkItemEmbeddedLinks(sourceWorkItem, targetWorkItem);
             CheckClosedDateIsValid(sourceWorkItem, targetWorkItem);
+            RestoreEventDeltaRuleSideEffectValues(targetWorkItem.ToWorkItem(), ruleSideEffectValues);
 
             if (!SkipRevisionWithInvalidIterationPath(targetWorkItem) && !SkipRevisionWithInvalidAreaPath(targetWorkItem))
             {
