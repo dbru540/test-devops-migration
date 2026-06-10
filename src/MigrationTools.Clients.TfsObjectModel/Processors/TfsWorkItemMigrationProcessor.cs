@@ -523,6 +523,11 @@ namespace MigrationTools.Processors
         {
             "Microsoft.VSTS.Scheduling.TargetDate"
         };
+        private static readonly HashSet<string> EventDeltaPathFields = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "System.AreaPath",
+            "System.IterationPath"
+        };
         private static readonly Regex IdentityEmailRegex = new Regex("<(?<email>[A-Z0-9._%+\\-']+@[A-Z0-9.\\-]+\\.[A-Z]{2,})>", RegexOptions.IgnoreCase | RegexOptions.Compiled);
         private static readonly Regex BareEmailRegex = new Regex("(?<email>[A-Z0-9._%+\\-']+@[A-Z0-9.\\-]+\\.[A-Z]{2,})", RegexOptions.IgnoreCase | RegexOptions.Compiled);
         private static readonly Regex ExplicitDateTimeZoneRegex = new Regex("(Z|[+-]\\d{2}:?\\d{2})$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
@@ -1118,8 +1123,6 @@ namespace MigrationTools.Processors
         }
 
         // Antiloop: service account emails read from ANTILOOP_ACCOUNTS env var (comma-separated).
-        private static readonly HashSet<string> AntiloopAccounts = ParseAntiloopAccounts();
-
         private static HashSet<string> ParseAntiloopAccounts()
         {
             string env = Environment.GetEnvironmentVariable("ANTILOOP_ACCOUNTS");
@@ -1137,7 +1140,7 @@ namespace MigrationTools.Processors
         private static bool IsAntiloopAccount(string identity)
         {
             if (string.IsNullOrEmpty(identity)) return false;
-            return AntiloopAccounts.Any(a =>
+            return ParseAntiloopAccounts().Any(a =>
                 identity.IndexOf(a, StringComparison.OrdinalIgnoreCase) >= 0 ||
                 (a.Contains("@") && identity.IndexOf(a.Split('@')[0], StringComparison.OrdinalIgnoreCase) >= 0));
         }
@@ -1206,14 +1209,18 @@ namespace MigrationTools.Processors
 
         private sealed class EventDeltaFieldChangeInfo
         {
-            public EventDeltaFieldChangeInfo(DateTime changedDate, string changedBy)
+            public EventDeltaFieldChangeInfo(DateTime changedDate, string changedBy, string authorizedAs = "", bool isSyncGenerated = false)
             {
                 ChangedDate = changedDate;
                 ChangedBy = NormalizeEventDeltaAuditAuthor(changedBy);
+                AuthorizedAs = NormalizeEventDeltaAuditAuthor(authorizedAs);
+                IsSyncGenerated = isSyncGenerated || IsEventDeltaTargetFieldChangeFromSyncAccount(changedBy, authorizedAs);
             }
 
             public DateTime ChangedDate { get; }
             public string ChangedBy { get; }
+            public string AuthorizedAs { get; }
+            public bool IsSyncGenerated { get; }
         }
 
         private static EventDeltaOptions GetEventDeltaOptionsFromEnvironment()
@@ -1403,7 +1410,23 @@ namespace MigrationTools.Processors
             {
                 return NormalizeDateOnlyConflictValue(value);
             }
+            if (EventDeltaPathFields.Contains(fieldName))
+            {
+                return NormalizePathConflictValue(value);
+            }
             return NormalizeConflictValue(value);
+        }
+
+        private static string NormalizePathConflictValue(string value)
+        {
+            string normalizedValue = NormalizeConflictValue(value).Replace('/', '\\');
+            int projectSeparatorIndex = normalizedValue.IndexOf('\\');
+            if (projectSeparatorIndex < 0)
+            {
+                return "";
+            }
+
+            return normalizedValue.Substring(projectSeparatorIndex + 1).Trim().ToLowerInvariant();
         }
 
         private static bool IsEventDeltaDateOnlyField(string fieldName)
@@ -1545,6 +1568,18 @@ namespace MigrationTools.Processors
             return currentTargetChangedDate.ToUniversalTime() > incomingChangedDate.ToUniversalTime();
         }
 
+        private static bool IsEventDeltaTargetFieldChangeFromSyncAccount(string changedBy, string authorizedAs)
+        {
+            return IsAntiloopAccount(changedBy) || IsAntiloopAccount(authorizedAs);
+        }
+
+        private static bool ShouldSkipEventDeltaConflictField(DateTime incomingChangedDate, EventDeltaFieldChangeInfo targetFieldChangeInfo)
+        {
+            return targetFieldChangeInfo != null &&
+                   targetFieldChangeInfo.IsSyncGenerated &&
+                   ShouldPreserveCurrentTargetConflictValue(incomingChangedDate, targetFieldChangeInfo.ChangedDate);
+        }
+
         private static DateTime GetLatestTargetFieldChangedDate(WorkItemData targetWorkItem, string fieldName, DateTime fallbackChangedDate)
         {
             return GetLatestTargetFieldChangeInfo(targetWorkItem, fieldName, fallbackChangedDate, "").ChangedDate;
@@ -1573,7 +1608,11 @@ namespace MigrationTools.Processors
                 string currentValue = NormalizeConflictValue(fieldName, revision.Fields[fieldName].Value?.ToString(), null);
                 if (!hasLastValue || !string.Equals(currentValue, lastValue, StringComparison.Ordinal))
                 {
-                    latestChangeInfo = new EventDeltaFieldChangeInfo(revision.ChangedDate, GetRevisionChangedBy(revision, fallbackChangedBy));
+                    latestChangeInfo = new EventDeltaFieldChangeInfo(
+                        revision.ChangedDate,
+                        GetRevisionChangedBy(revision, fallbackChangedBy),
+                        GetRevisionAuthorizedAs(revision),
+                        IsSyncGeneratedRevision(revision));
                     lastValue = currentValue;
                     hasLastValue = true;
                 }
@@ -1592,6 +1631,18 @@ namespace MigrationTools.Processors
             }
 
             return fallbackChangedBy;
+        }
+
+        private static string GetRevisionAuthorizedAs(RevisionItem revision, string fallbackAuthorizedAs = "")
+        {
+            if (revision?.Fields != null &&
+                revision.Fields.TryGetValue("System.AuthorizedAs", out FieldItem authorizedAsField) &&
+                authorizedAsField?.Value != null)
+            {
+                return authorizedAsField.Value.ToString();
+            }
+
+            return fallbackAuthorizedAs;
         }
 
         private static string NormalizeEventDeltaAuditAuthor(string value)
@@ -2293,6 +2344,16 @@ namespace MigrationTools.Processors
                 if (IsEventDeltaConflict(fieldName, expectedOldValue, currentTargetValue, incomingNewValue))
                 {
                     EventDeltaFieldChangeInfo currentTargetFieldChangeInfo = GetLatestTargetFieldChangeInfo(targetWorkItem, fieldName, currentTargetChangedDate, currentTargetChangedBy);
+                    if (ShouldSkipEventDeltaConflictField(incomingChangedDate, currentTargetFieldChangeInfo))
+                    {
+                        fieldsToSkip.Add(fieldName);
+                        continue;
+                    }
+                    if (currentTargetFieldChangeInfo.IsSyncGenerated)
+                    {
+                        continue;
+                    }
+
                     bool preserveTargetValue = ShouldPreserveCurrentTargetConflictValue(incomingChangedDate, currentTargetFieldChangeInfo.ChangedDate);
                     string appliedValue = preserveTargetValue ? currentTargetValue : incomingNewValue;
                     string resolution = preserveTargetValue ? "newer target value preserved" : "latest incoming event applied";

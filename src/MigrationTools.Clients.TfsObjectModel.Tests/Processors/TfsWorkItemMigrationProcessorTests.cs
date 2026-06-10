@@ -276,6 +276,59 @@ namespace MigrationTools.Processors.Tests
             }));
         }
 
+        [TestMethod("TfsWorkItemMigrationProcessorTests_EventDelta_Path_Conflict_Normalizes_Project_Prefix"), TestCategory("L0")]
+        public void EventDelta_Path_Conflict_Normalizes_Project_Prefix()
+        {
+            MethodInfo method = typeof(TfsWorkItemMigrationProcessor).GetMethod("IsEventDeltaConflict", BindingFlags.NonPublic | BindingFlags.Static);
+
+            Assert.IsNotNull(method);
+            Assert.IsFalse((bool)method.Invoke(null, new object[]
+            {
+                "System.AreaPath",
+                "Christofle\\Project_Priced",
+                "ERP program\\Project_Priced\\Reporting BI",
+                "Christofle\\Project_Priced\\Reporting BI"
+            }));
+            Assert.IsFalse((bool)method.Invoke(null, new object[]
+            {
+                "System.IterationPath",
+                "Christofle\\2026 Q2",
+                "ERP program\\2026 Q2\\D365FO",
+                "Christofle\\2026 Q2\\D365FO"
+            }));
+            Assert.IsTrue((bool)method.Invoke(null, new object[]
+            {
+                "System.AreaPath",
+                "Christofle\\Project_Priced",
+                "ERP program\\Project_Priced\\Finance",
+                "Christofle\\Project_Priced\\Reporting BI"
+            }));
+        }
+
+        [TestMethod("TfsWorkItemMigrationProcessorTests_EventDelta_Target_Field_Change_Uses_AuthorizedAs_For_Sync_Account"), TestCategory("L0")]
+        public void EventDelta_Target_Field_Change_Uses_AuthorizedAs_For_Sync_Account()
+        {
+            Environment.SetEnvironmentVariable("ANTILOOP_ACCOUNTS", "admin-d365,svc-msflow@fiveforty.fr");
+            MethodInfo method = typeof(TfsWorkItemMigrationProcessor).GetMethod("IsEventDeltaTargetFieldChangeFromSyncAccount", BindingFlags.NonPublic | BindingFlags.Static);
+
+            Assert.IsNotNull(method);
+            Assert.IsTrue((bool)method.Invoke(null, new object[]
+            {
+                "Joseph Dumoulin <jdumoulin@fiveforty.fr>",
+                "admin-d365"
+            }));
+            Assert.IsFalse((bool)method.Invoke(null, new object[]
+            {
+                "Joseph Dumoulin <jdumoulin@fiveforty.fr>",
+                ""
+            }));
+            Assert.IsTrue((bool)method.Invoke(null, new object[]
+            {
+                "",
+                "admin-d365"
+            }));
+        }
+
         [TestMethod("TfsWorkItemMigrationProcessorTests_EventDelta_Preserves_AssignedTo_When_Absent_From_Delta"), TestCategory("L0")]
         public void EventDelta_Preserves_AssignedTo_When_Absent_From_Delta()
         {
@@ -495,6 +548,43 @@ namespace MigrationTools.Processors.Tests
 
             Assert.AreEqual(new DateTime(2026, 6, 8, 14, 13, 54, DateTimeKind.Utc), fieldChangeInfo.GetType().GetProperty("ChangedDate").GetValue(fieldChangeInfo));
             Assert.AreEqual("Macire Sacko <msacko@fiveforty.fr>", fieldChangeInfo.GetType().GetProperty("ChangedBy").GetValue(fieldChangeInfo));
+        }
+
+        [TestMethod("TfsWorkItemMigrationProcessorTests_EventDelta_Field_Change_Info_Tracks_Sync_AuthorizedAs"), TestCategory("L0")]
+        public void EventDelta_Field_Change_Info_Tracks_Sync_AuthorizedAs()
+        {
+            Environment.SetEnvironmentVariable("ANTILOOP_ACCOUNTS", "admin-d365");
+            MethodInfo method = typeof(TfsWorkItemMigrationProcessor).GetMethod("GetLatestTargetFieldChangeInfo", BindingFlags.NonPublic | BindingFlags.Static);
+            WorkItemData targetWorkItem = new WorkItemData
+            {
+                Revisions = new SortedDictionary<int, RevisionItem>
+                {
+                    [1] = new RevisionItem
+                    {
+                        Number = 1,
+                        ChangedDate = new DateTime(2026, 6, 10, 14, 39, 20, DateTimeKind.Utc),
+                        Fields = new Dictionary<string, FieldItem>
+                        {
+                            ["System.ChangedBy"] = new FieldItem { Value = "Joseph Dumoulin <jdumoulin@fiveforty.fr>" },
+                            ["System.AuthorizedAs"] = new FieldItem { Value = "admin-d365 <admin-d365@christofle.com>" },
+                            ["System.AreaPath"] = new FieldItem { Value = "ERP program\\Project_Priced\\Reporting BI" },
+                        },
+                    },
+                },
+            };
+
+            Assert.IsNotNull(method);
+            object fieldChangeInfo = method.Invoke(null, new object[]
+            {
+                targetWorkItem,
+                "System.AreaPath",
+                new DateTime(2026, 6, 10, 14, 39, 20, DateTimeKind.Utc),
+                "fallback <fallback@example.com>"
+            });
+
+            Assert.AreEqual("Joseph Dumoulin <jdumoulin@fiveforty.fr>", fieldChangeInfo.GetType().GetProperty("ChangedBy").GetValue(fieldChangeInfo));
+            Assert.AreEqual("admin-d365 <admin-d365@christofle.com>", fieldChangeInfo.GetType().GetProperty("AuthorizedAs").GetValue(fieldChangeInfo));
+            Assert.AreEqual(true, fieldChangeInfo.GetType().GetProperty("IsSyncGenerated").GetValue(fieldChangeInfo));
         }
 
         [TestMethod("TfsWorkItemMigrationProcessorTests_Normal_Api_Comment_Sync_Does_Not_Post_Monitoring_Alert"), TestCategory("L0")]
