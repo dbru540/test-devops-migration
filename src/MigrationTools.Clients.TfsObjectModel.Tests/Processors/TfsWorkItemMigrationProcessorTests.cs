@@ -246,6 +246,36 @@ namespace MigrationTools.Processors.Tests
             }));
         }
 
+        [TestMethod("TfsWorkItemMigrationProcessorTests_EventDelta_Identity_Conflict_Treats_DisplayName_As_Same_When_Email_Is_Missing_On_Target"), TestCategory("L0")]
+        public void EventDelta_Identity_Conflict_Treats_DisplayName_As_Same_When_Email_Is_Missing_On_Target()
+        {
+            MethodInfo method = typeof(TfsWorkItemMigrationProcessor).GetMethod("IsEventDeltaConflict", BindingFlags.NonPublic | BindingFlags.Static);
+
+            Assert.IsNotNull(method);
+            Assert.IsFalse((bool)method.Invoke(null, new object[]
+            {
+                "System.AssignedTo",
+                "Lionel Descamps <ldescamps@fiveforty.fr>",
+                "Lionel Descamps",
+                "Maciré Sacko <msacko@fiveforty.fr>"
+            }));
+        }
+
+        [TestMethod("TfsWorkItemMigrationProcessorTests_EventDelta_DateOnly_Conflict_Normalizes_DevOps_UTC_And_Local_Midnight"), TestCategory("L0")]
+        public void EventDelta_DateOnly_Conflict_Normalizes_DevOps_UTC_And_Local_Midnight()
+        {
+            MethodInfo method = typeof(TfsWorkItemMigrationProcessor).GetMethod("IsEventDeltaConflict", BindingFlags.NonPublic | BindingFlags.Static);
+
+            Assert.IsNotNull(method);
+            Assert.IsFalse((bool)method.Invoke(null, new object[]
+            {
+                "Microsoft.VSTS.Scheduling.TargetDate",
+                "6/19/2026 10:00:00 PM",
+                "6/20/2026 12:00:00 AM",
+                "6/12/2026 10:00:00 PM"
+            }));
+        }
+
         [TestMethod("TfsWorkItemMigrationProcessorTests_EventDelta_Preserves_AssignedTo_When_Absent_From_Delta"), TestCategory("L0")]
         public void EventDelta_Preserves_AssignedTo_When_Absent_From_Delta()
         {
@@ -375,6 +405,47 @@ namespace MigrationTools.Processors.Tests
             });
 
             Assert.AreEqual(new DateTime(2026, 5, 25, 6, 16, 0, DateTimeKind.Utc), fieldChangedDate);
+        }
+
+        [TestMethod("TfsWorkItemMigrationProcessorTests_EventDelta_Field_Changed_Date_Ignores_Later_Snapshot_With_Same_Value"), TestCategory("L0")]
+        public void EventDelta_Field_Changed_Date_Ignores_Later_Snapshot_With_Same_Value()
+        {
+            MethodInfo method = typeof(TfsWorkItemMigrationProcessor).GetMethod("GetLatestTargetFieldChangedDate", BindingFlags.NonPublic | BindingFlags.Static);
+            WorkItemData targetWorkItem = new WorkItemData
+            {
+                Revisions = new SortedDictionary<int, RevisionItem>
+                {
+                    [1] = new RevisionItem
+                    {
+                        Number = 1,
+                        ChangedDate = new DateTime(2026, 6, 8, 14, 13, 54, DateTimeKind.Utc),
+                        Fields = new Dictionary<string, FieldItem>
+                        {
+                            ["Microsoft.VSTS.Scheduling.TargetDate"] = new FieldItem { Value = "6/2/2026 12:00:00 AM" },
+                        },
+                    },
+                    [2] = new RevisionItem
+                    {
+                        Number = 2,
+                        ChangedDate = new DateTime(2026, 6, 10, 6, 59, 45, DateTimeKind.Utc),
+                        Fields = new Dictionary<string, FieldItem>
+                        {
+                            ["System.History"] = new FieldItem { Value = "<div>sync comment</div>" },
+                            ["Microsoft.VSTS.Scheduling.TargetDate"] = new FieldItem { Value = "6/2/2026 12:00:00 AM" },
+                        },
+                    },
+                },
+            };
+
+            Assert.IsNotNull(method);
+            DateTime fieldChangedDate = (DateTime)method.Invoke(null, new object[]
+            {
+                targetWorkItem,
+                "Microsoft.VSTS.Scheduling.TargetDate",
+                new DateTime(2026, 6, 10, 6, 59, 45, DateTimeKind.Utc)
+            });
+
+            Assert.AreEqual(new DateTime(2026, 6, 8, 14, 13, 54, DateTimeKind.Utc), fieldChangedDate);
         }
 
         [TestMethod("TfsWorkItemMigrationProcessorTests_Normal_Api_Comment_Sync_Does_Not_Post_Monitoring_Alert"), TestCategory("L0")]

@@ -519,8 +519,13 @@ namespace MigrationTools.Processors
         {
             "System.AssignedTo"
         };
+        private static readonly HashSet<string> EventDeltaDateOnlyFields = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "Microsoft.VSTS.Scheduling.TargetDate"
+        };
         private static readonly Regex IdentityEmailRegex = new Regex("<(?<email>[A-Z0-9._%+\\-']+@[A-Z0-9.\\-]+\\.[A-Z]{2,})>", RegexOptions.IgnoreCase | RegexOptions.Compiled);
         private static readonly Regex BareEmailRegex = new Regex("(?<email>[A-Z0-9._%+\\-']+@[A-Z0-9.\\-]+\\.[A-Z]{2,})", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        private static readonly Regex ExplicitDateTimeZoneRegex = new Regex("(Z|[+-]\\d{2}:?\\d{2})$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
         private void PopulateIgnoreList()
         {
@@ -1350,6 +1355,12 @@ namespace MigrationTools.Processors
 
         private static bool IsEventDeltaConflict(string fieldName, string expectedOldValue, string currentTargetValue, string incomingNewValue)
         {
+            if (EventDeltaIdentityFields.Contains(fieldName))
+            {
+                return !AreIdentityConflictValuesEquivalent(currentTargetValue, expectedOldValue) &&
+                       !AreIdentityConflictValuesEquivalent(currentTargetValue, incomingNewValue);
+            }
+
             string expected = NormalizeConflictValue(fieldName, expectedOldValue, incomingNewValue);
             string current = NormalizeConflictValue(fieldName, currentTargetValue, incomingNewValue);
             string incoming = NormalizeConflictValue(fieldName, incomingNewValue, currentTargetValue);
@@ -1376,7 +1387,18 @@ namespace MigrationTools.Processors
             {
                 return NormalizeIdentityConflictValue(value, relatedIdentityValue);
             }
+            if (IsEventDeltaDateOnlyField(fieldName))
+            {
+                return NormalizeDateOnlyConflictValue(value);
+            }
             return NormalizeConflictValue(value);
+        }
+
+        private static bool IsEventDeltaDateOnlyField(string fieldName)
+        {
+            return EventDeltaDateOnlyFields.Contains(fieldName) ||
+                   (!string.IsNullOrWhiteSpace(fieldName) &&
+                    fieldName.EndsWith("TargetDate", StringComparison.OrdinalIgnoreCase));
         }
 
         private static string NormalizeIdentityConflictValue(string value, string relatedIdentityValue)
@@ -1395,6 +1417,89 @@ namespace MigrationTools.Processors
             }
 
             return normalizedValue.ToLowerInvariant();
+        }
+
+        private static bool AreIdentityConflictValuesEquivalent(string left, string right)
+        {
+            string leftEmail = ExtractIdentityEmail(left);
+            string rightEmail = ExtractIdentityEmail(right);
+            if (!string.IsNullOrEmpty(leftEmail) && !string.IsNullOrEmpty(rightEmail))
+            {
+                return string.Equals(leftEmail, rightEmail, StringComparison.OrdinalIgnoreCase);
+            }
+
+            if (!string.IsNullOrEmpty(leftEmail) || !string.IsNullOrEmpty(rightEmail))
+            {
+                return IdentityDisplayNamesMatch(left, right);
+            }
+
+            return string.Equals(
+                NormalizeIdentityDisplayName(left),
+                NormalizeIdentityDisplayName(right),
+                StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string NormalizeDateOnlyConflictValue(string value)
+        {
+            string normalizedValue = NormalizeConflictValue(value);
+            if (!TryParseDevOpsDate(normalizedValue, out DateTime parsedDate))
+            {
+                return normalizedValue;
+            }
+
+            DateTime utcDate = DateTime.SpecifyKind(parsedDate, DateTimeKind.Utc);
+            DateTime localDate = TimeZoneInfo.ConvertTimeFromUtc(utcDate, GetDevOpsBusinessTimeZone());
+            return localDate.Date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+        }
+
+        private static bool TryParseDevOpsDate(string value, out DateTime parsedDate)
+        {
+            bool hasExplicitTimeZone = ExplicitDateTimeZoneRegex.IsMatch(value);
+            if (hasExplicitTimeZone &&
+                DateTimeOffset.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.AllowWhiteSpaces, out DateTimeOffset invariantOffset))
+            {
+                parsedDate = invariantOffset.UtcDateTime;
+                return true;
+            }
+            if (hasExplicitTimeZone &&
+                DateTimeOffset.TryParse(value, CultureInfo.CurrentCulture, DateTimeStyles.AllowWhiteSpaces, out DateTimeOffset currentOffset))
+            {
+                parsedDate = currentOffset.UtcDateTime;
+                return true;
+            }
+
+            if (DateTime.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.AllowWhiteSpaces, out DateTime invariantDate))
+            {
+                parsedDate = invariantDate;
+                return true;
+            }
+            if (DateTime.TryParse(value, CultureInfo.CurrentCulture, DateTimeStyles.AllowWhiteSpaces, out DateTime currentDate))
+            {
+                parsedDate = currentDate;
+                return true;
+            }
+
+            parsedDate = DateTime.MinValue;
+            return false;
+        }
+
+        private static TimeZoneInfo GetDevOpsBusinessTimeZone()
+        {
+            foreach (string timeZoneId in new[] { "Europe/Paris", "Romance Standard Time" })
+            {
+                try
+                {
+                    return TimeZoneInfo.FindSystemTimeZoneById(timeZoneId);
+                }
+                catch (TimeZoneNotFoundException)
+                {
+                }
+                catch (InvalidTimeZoneException)
+                {
+                }
+            }
+
+            return TimeZoneInfo.Local;
         }
 
         private static string ExtractIdentityEmail(string value)
@@ -1435,17 +1540,29 @@ namespace MigrationTools.Processors
                 return fallbackChangedDate;
             }
 
+            bool hasLastValue = false;
+            string lastValue = null;
+            DateTime? latestChangedDate = null;
             foreach (RevisionItem revision in targetWorkItem.Revisions.Values
-                .OrderByDescending(r => r.ChangedDate.ToUniversalTime())
-                .ThenByDescending(r => r.Number))
+                .Where(r => r?.Fields != null)
+                .OrderBy(r => r.ChangedDate.ToUniversalTime())
+                .ThenBy(r => r.Number))
             {
-                if (revision?.Fields != null && revision.Fields.ContainsKey(fieldName))
+                if (!revision.Fields.ContainsKey(fieldName))
                 {
-                    return revision.ChangedDate;
+                    continue;
+                }
+
+                string currentValue = NormalizeConflictValue(fieldName, revision.Fields[fieldName].Value?.ToString(), null);
+                if (!hasLastValue || !string.Equals(currentValue, lastValue, StringComparison.Ordinal))
+                {
+                    latestChangedDate = revision.ChangedDate;
+                    lastValue = currentValue;
+                    hasLastValue = true;
                 }
             }
 
-            return fallbackChangedDate;
+            return latestChangedDate ?? fallbackChangedDate;
         }
 
         private static string BuildEventDeltaConflictComment(string fieldName, string expectedOldValue, string currentTargetValue, string incomingNewValue, string appliedValue, string resolution, string direction, int revisionNumber, DateTime incomingChangedDate, DateTime currentTargetFieldChangedDate)
