@@ -1204,6 +1204,18 @@ namespace MigrationTools.Processors
             public bool HasObjectModelFields => HasPayload && FieldNames.Count > 0;
         }
 
+        private sealed class EventDeltaFieldChangeInfo
+        {
+            public EventDeltaFieldChangeInfo(DateTime changedDate, string changedBy)
+            {
+                ChangedDate = changedDate;
+                ChangedBy = NormalizeEventDeltaAuditAuthor(changedBy);
+            }
+
+            public DateTime ChangedDate { get; }
+            public string ChangedBy { get; }
+        }
+
         private static EventDeltaOptions GetEventDeltaOptionsFromEnvironment()
         {
             string revisionValue = Environment.GetEnvironmentVariable("DEVOPSSYNC_EVENT_REVISION");
@@ -1535,14 +1547,19 @@ namespace MigrationTools.Processors
 
         private static DateTime GetLatestTargetFieldChangedDate(WorkItemData targetWorkItem, string fieldName, DateTime fallbackChangedDate)
         {
+            return GetLatestTargetFieldChangeInfo(targetWorkItem, fieldName, fallbackChangedDate, "").ChangedDate;
+        }
+
+        private static EventDeltaFieldChangeInfo GetLatestTargetFieldChangeInfo(WorkItemData targetWorkItem, string fieldName, DateTime fallbackChangedDate, string fallbackChangedBy)
+        {
             if (targetWorkItem?.Revisions == null || string.IsNullOrWhiteSpace(fieldName))
             {
-                return fallbackChangedDate;
+                return new EventDeltaFieldChangeInfo(fallbackChangedDate, fallbackChangedBy);
             }
 
             bool hasLastValue = false;
             string lastValue = null;
-            DateTime? latestChangedDate = null;
+            EventDeltaFieldChangeInfo latestChangeInfo = null;
             foreach (RevisionItem revision in targetWorkItem.Revisions.Values
                 .Where(r => r?.Fields != null)
                 .OrderBy(r => r.ChangedDate.ToUniversalTime())
@@ -1556,19 +1573,38 @@ namespace MigrationTools.Processors
                 string currentValue = NormalizeConflictValue(fieldName, revision.Fields[fieldName].Value?.ToString(), null);
                 if (!hasLastValue || !string.Equals(currentValue, lastValue, StringComparison.Ordinal))
                 {
-                    latestChangedDate = revision.ChangedDate;
+                    latestChangeInfo = new EventDeltaFieldChangeInfo(revision.ChangedDate, GetRevisionChangedBy(revision, fallbackChangedBy));
                     lastValue = currentValue;
                     hasLastValue = true;
                 }
             }
 
-            return latestChangedDate ?? fallbackChangedDate;
+            return latestChangeInfo ?? new EventDeltaFieldChangeInfo(fallbackChangedDate, fallbackChangedBy);
         }
 
-        private static string BuildEventDeltaConflictComment(string fieldName, string expectedOldValue, string currentTargetValue, string incomingNewValue, string appliedValue, string resolution, string direction, int revisionNumber, DateTime incomingChangedDate, DateTime currentTargetFieldChangedDate)
+        private static string GetRevisionChangedBy(RevisionItem revision, string fallbackChangedBy = "")
+        {
+            if (revision?.Fields != null &&
+                revision.Fields.TryGetValue("System.ChangedBy", out FieldItem changedByField) &&
+                changedByField?.Value != null)
+            {
+                return changedByField.Value.ToString();
+            }
+
+            return fallbackChangedBy;
+        }
+
+        private static string NormalizeEventDeltaAuditAuthor(string value)
+        {
+            return string.IsNullOrWhiteSpace(value) ? "(unknown)" : value.Trim();
+        }
+
+        private static string BuildEventDeltaConflictComment(string fieldName, string expectedOldValue, string currentTargetValue, string incomingNewValue, string appliedValue, string resolution, string direction, int revisionNumber, DateTime incomingChangedDate, DateTime currentTargetFieldChangedDate, string incomingAuthor, string targetFieldAuthor)
         {
             string incomingChangedDateText = incomingChangedDate.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture);
             string targetFieldChangedDateText = currentTargetFieldChangedDate.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture);
+            string incomingAuthorText = NormalizeEventDeltaAuditAuthor(incomingAuthor);
+            string targetFieldAuthorText = NormalizeEventDeltaAuditAuthor(targetFieldAuthor);
 
             return
                 "<span style=\"display:none;\">sync-src:conflict:event-delta</span>" +
@@ -1582,6 +1618,8 @@ namespace MigrationTools.Processors
                 $"Applied latest value: {WebUtility.HtmlEncode(appliedValue)}<br/>" +
                 $"Incoming changed date: {incomingChangedDateText}<br/>" +
                 $"Target field changed date: {targetFieldChangedDateText}<br/>" +
+                $"Incoming author: {WebUtility.HtmlEncode(incomingAuthorText)}<br/>" +
+                $"Target field author: {WebUtility.HtmlEncode(targetFieldAuthorText)}<br/>" +
                 $"Resolution: {WebUtility.HtmlEncode(resolution)}<br/>" +
                 "Rule: latest timestamp wins";
         }
@@ -2174,7 +2212,7 @@ namespace MigrationTools.Processors
 
             DateTime lastSavedDate = targetWorkItem?.ToWorkItem()?.Fields["System.ChangedDate"]?.Value is DateTime d ? d : DateTime.MinValue;
             var fieldsToSkip = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            List<string> conflictComments = BuildEventDeltaConflictComments(eventDelta, targetWorkItem, revision.Number, revision.ChangedDate, lastSavedDate, fieldsToSkip);
+            List<string> conflictComments = BuildEventDeltaConflictComments(eventDelta, targetWorkItem, revision.Number, revision.ChangedDate, lastSavedDate, GetRevisionChangedBy(revision), fieldsToSkip);
             var fieldsToApply = new HashSet<string>(eventDelta.FieldNames, StringComparer.OrdinalIgnoreCase);
             foreach (string fieldName in fieldsToSkip)
             {
@@ -2234,10 +2272,13 @@ namespace MigrationTools.Processors
             return targetWorkItem;
         }
 
-        private List<string> BuildEventDeltaConflictComments(EventDeltaOptions eventDelta, WorkItemData targetWorkItem, int revisionNumber, DateTime incomingChangedDate, DateTime currentTargetChangedDate, ICollection<string> fieldsToSkip)
+        private List<string> BuildEventDeltaConflictComments(EventDeltaOptions eventDelta, WorkItemData targetWorkItem, int revisionNumber, DateTime incomingChangedDate, DateTime currentTargetChangedDate, string incomingAuthor, ICollection<string> fieldsToSkip)
         {
             var comments = new List<string>();
             WorkItem target = targetWorkItem.ToWorkItem();
+            string currentTargetChangedBy = target.Fields.Contains("System.ChangedBy")
+                ? target.Fields["System.ChangedBy"].Value?.ToString()
+                : "";
             foreach (string fieldName in eventDelta.FieldNames)
             {
                 if (!target.Fields.Contains(fieldName) || !EventDeltaHasValue(eventDelta.ChangedFields, fieldName, "oldValue"))
@@ -2251,15 +2292,15 @@ namespace MigrationTools.Processors
 
                 if (IsEventDeltaConflict(fieldName, expectedOldValue, currentTargetValue, incomingNewValue))
                 {
-                    DateTime currentTargetFieldChangedDate = GetLatestTargetFieldChangedDate(targetWorkItem, fieldName, currentTargetChangedDate);
-                    bool preserveTargetValue = ShouldPreserveCurrentTargetConflictValue(incomingChangedDate, currentTargetFieldChangedDate);
+                    EventDeltaFieldChangeInfo currentTargetFieldChangeInfo = GetLatestTargetFieldChangeInfo(targetWorkItem, fieldName, currentTargetChangedDate, currentTargetChangedBy);
+                    bool preserveTargetValue = ShouldPreserveCurrentTargetConflictValue(incomingChangedDate, currentTargetFieldChangeInfo.ChangedDate);
                     string appliedValue = preserveTargetValue ? currentTargetValue : incomingNewValue;
                     string resolution = preserveTargetValue ? "newer target value preserved" : "latest incoming event applied";
                     if (preserveTargetValue)
                     {
                         fieldsToSkip.Add(fieldName);
                     }
-                    comments.Add(BuildEventDeltaConflictComment(fieldName, expectedOldValue, currentTargetValue, incomingNewValue, appliedValue, resolution, Options.SourceName, revisionNumber, incomingChangedDate, currentTargetFieldChangedDate));
+                    comments.Add(BuildEventDeltaConflictComment(fieldName, expectedOldValue, currentTargetValue, incomingNewValue, appliedValue, resolution, Options.SourceName, revisionNumber, incomingChangedDate, currentTargetFieldChangeInfo.ChangedDate, incomingAuthor, currentTargetFieldChangeInfo.ChangedBy));
                 }
             }
             return comments;

@@ -326,7 +326,9 @@ namespace MigrationTools.Processors.Tests
                 "src",
                 12,
                 new DateTime(2026, 6, 5, 7, 15, 42, 910, DateTimeKind.Utc),
-                new DateTime(2026, 6, 5, 7, 17, 55, 147, DateTimeKind.Utc)
+                new DateTime(2026, 6, 5, 7, 17, 55, 147, DateTimeKind.Utc),
+                "Macire Sacko <msacko@fiveforty.fr>",
+                "Lionel Descamps <ldescamps@fiveforty.fr>"
             });
 
             StringAssert.Contains(comment, "Sync conflict resolved");
@@ -337,6 +339,8 @@ namespace MigrationTools.Processors.Tests
             StringAssert.Contains(comment, "Resolution: latest incoming event applied");
             StringAssert.Contains(comment, "Incoming changed date: 2026-06-05T07:15:42.9100000Z");
             StringAssert.Contains(comment, "Target field changed date: 2026-06-05T07:17:55.1470000Z");
+            StringAssert.Contains(comment, "Incoming author: Macire Sacko &lt;msacko@fiveforty.fr&gt;");
+            StringAssert.Contains(comment, "Target field author: Lionel Descamps &lt;ldescamps@fiveforty.fr&gt;");
             StringAssert.Contains(comment, "Rule: latest timestamp wins");
         }
 
@@ -446,6 +450,51 @@ namespace MigrationTools.Processors.Tests
             });
 
             Assert.AreEqual(new DateTime(2026, 6, 8, 14, 13, 54, DateTimeKind.Utc), fieldChangedDate);
+        }
+
+        [TestMethod("TfsWorkItemMigrationProcessorTests_EventDelta_Field_Change_Info_Ignores_Later_Snapshot_With_Same_Value_And_Returns_Author"), TestCategory("L0")]
+        public void EventDelta_Field_Change_Info_Ignores_Later_Snapshot_With_Same_Value_And_Returns_Author()
+        {
+            MethodInfo method = typeof(TfsWorkItemMigrationProcessor).GetMethod("GetLatestTargetFieldChangeInfo", BindingFlags.NonPublic | BindingFlags.Static);
+            WorkItemData targetWorkItem = new WorkItemData
+            {
+                Revisions = new SortedDictionary<int, RevisionItem>
+                {
+                    [1] = new RevisionItem
+                    {
+                        Number = 1,
+                        ChangedDate = new DateTime(2026, 6, 8, 14, 13, 54, DateTimeKind.Utc),
+                        Fields = new Dictionary<string, FieldItem>
+                        {
+                            ["System.ChangedBy"] = new FieldItem { Value = "Macire Sacko <msacko@fiveforty.fr>" },
+                            ["Microsoft.VSTS.Scheduling.TargetDate"] = new FieldItem { Value = "6/2/2026 12:00:00 AM" },
+                        },
+                    },
+                    [2] = new RevisionItem
+                    {
+                        Number = 2,
+                        ChangedDate = new DateTime(2026, 6, 10, 6, 59, 45, DateTimeKind.Utc),
+                        Fields = new Dictionary<string, FieldItem>
+                        {
+                            ["System.ChangedBy"] = new FieldItem { Value = "svc-msflow <svc-msflow@fiveforty.fr>" },
+                            ["System.History"] = new FieldItem { Value = "<div>sync comment</div>" },
+                            ["Microsoft.VSTS.Scheduling.TargetDate"] = new FieldItem { Value = "6/2/2026 12:00:00 AM" },
+                        },
+                    },
+                },
+            };
+
+            Assert.IsNotNull(method);
+            object fieldChangeInfo = method.Invoke(null, new object[]
+            {
+                targetWorkItem,
+                "Microsoft.VSTS.Scheduling.TargetDate",
+                new DateTime(2026, 6, 10, 6, 59, 45, DateTimeKind.Utc),
+                "fallback <fallback@example.com>"
+            });
+
+            Assert.AreEqual(new DateTime(2026, 6, 8, 14, 13, 54, DateTimeKind.Utc), fieldChangeInfo.GetType().GetProperty("ChangedDate").GetValue(fieldChangeInfo));
+            Assert.AreEqual("Macire Sacko <msacko@fiveforty.fr>", fieldChangeInfo.GetType().GetProperty("ChangedBy").GetValue(fieldChangeInfo));
         }
 
         [TestMethod("TfsWorkItemMigrationProcessorTests_Normal_Api_Comment_Sync_Does_Not_Post_Monitoring_Alert"), TestCategory("L0")]
