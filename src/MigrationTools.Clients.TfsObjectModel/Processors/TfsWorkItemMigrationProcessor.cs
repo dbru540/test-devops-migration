@@ -915,6 +915,10 @@ namespace MigrationTools.Processors
                     });
                 if (!result.Succeeded)
                 {
+                    if (!save)
+                    {
+                        CommonTools.Attachment.CleanUpAfterSave();
+                    }
                     throw new InvalidOperationException(
                         $"Attachment synchronization failed for {result.Failed} of {result.Processed} attachments " +
                         $"from source work item {sourceWorkItem.Id} to target work item {targetWorkItem.Id}.");

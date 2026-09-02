@@ -147,8 +147,14 @@ namespace MigrationTools.Tools
 
             if (save)
             {
-                target.SaveToAzureDevOps();
-                CleanUpAfterSave();
+                try
+                {
+                    target.SaveToAzureDevOps();
+                }
+                finally
+                {
+                    CleanUpAfterSave();
+                }
             }
 
             Log.LogInformation(
