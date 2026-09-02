@@ -775,6 +775,22 @@ namespace MigrationTools.Processors
                                     new Dictionary<string, object>() { { "RevisionNumber", eventDelta.RevisionNumber.GetValueOrDefault() } });
                                 activity?.SetTag("Revisions", 0);
                             }
+
+                            if (eventDelta.HasAttachmentAdditions)
+                            {
+                                TraceWriteLine(
+                                    LogEventLevel.Information,
+                                    "Processing attachment additions for event revision {RevisionNumber}",
+                                    new Dictionary<string, object>()
+                                    {
+                                        { "RevisionNumber", eventDelta.RevisionNumber.GetValueOrDefault() }
+                                    });
+                                AttachmentProcessingResult attachmentResult = ProcessWorkItemAttachments(sourceWorkItem, targetWorkItem, true);
+                                activity?.SetTag("AttachmentsProcessed", attachmentResult.Processed);
+                                activity?.SetTag("AttachmentsAdded", attachmentResult.Added);
+                                activity?.SetTag("AttachmentsSkipped", attachmentResult.Skipped);
+                                activity?.SetTag("AttachmentsFailed", attachmentResult.Failed);
+                            }
                         }
                         else
                         {
@@ -878,15 +894,36 @@ namespace MigrationTools.Processors
             }
         }
 
-        private void ProcessWorkItemAttachments(WorkItemData sourceWorkItem, WorkItemData targetWorkItem, bool save = true)
+        private AttachmentProcessingResult ProcessWorkItemAttachments(WorkItemData sourceWorkItem, WorkItemData targetWorkItem, bool save = true)
         {
             if (targetWorkItem != null && CommonTools.Attachment.Enabled && sourceWorkItem.ToWorkItem().Attachments.Count > 0)
             {
                 TraceWriteLine(LogEventLevel.Information, "Attachemnts {SourceWorkItemAttachmentCount} | LinkMigrator:{AttachmentMigration}", new Dictionary<string, object>() { { "SourceWorkItemAttachmentCount", sourceWorkItem.ToWorkItem().Attachments.Count }, { "AttachmentMigration", CommonTools.Attachment.Enabled } });
                 // Use SmartProcessAttachments for intelligent duplicate handling with MD5 checksums
-                CommonTools.Attachment.SmartProcessAttachments(this, sourceWorkItem, targetWorkItem, save);
+                AttachmentProcessingResult result = CommonTools.Attachment.SmartProcessAttachments(this, sourceWorkItem, targetWorkItem, save);
+                TraceWriteLine(
+                    result.Succeeded ? LogEventLevel.Information : LogEventLevel.Error,
+                    "Attachment sync result for source {SourceWorkItemId} and target {TargetWorkItemId}: processed={Processed}, added={Added}, skipped={Skipped}, failed={Failed}",
+                    new Dictionary<string, object>()
+                    {
+                        { "SourceWorkItemId", sourceWorkItem.Id },
+                        { "TargetWorkItemId", targetWorkItem.Id },
+                        { "Processed", result.Processed },
+                        { "Added", result.Added },
+                        { "Skipped", result.Skipped },
+                        { "Failed", result.Failed }
+                    });
+                if (!result.Succeeded)
+                {
+                    throw new InvalidOperationException(
+                        $"Attachment synchronization failed for {result.Failed} of {result.Processed} attachments " +
+                        $"from source work item {sourceWorkItem.Id} to target work item {targetWorkItem.Id}.");
+                }
                 //AddMetric("Attachments", processWorkItemMetrics, targetWorkItem.ToWorkItem().AttachedFileCount);
+                return result;
             }
+
+            return new AttachmentProcessingResult();
         }
 
         private void ProcessWorkItemLinks(WorkItemData sourceWorkItem, WorkItemData targetWorkItem)
@@ -1203,6 +1240,7 @@ namespace MigrationTools.Processors
             public string ChangedFieldsJson { get; set; }
             public JObject ChangedFields { get; set; }
             public ICollection<string> FieldNames { get; set; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            public bool HasAttachmentAdditions { get; set; }
             public bool HasPayload => RevisionNumber.HasValue && !string.IsNullOrWhiteSpace(ChangedFieldsJson);
             public bool HasObjectModelFields => HasPayload && FieldNames.Count > 0;
         }
@@ -1233,13 +1271,17 @@ namespace MigrationTools.Processors
             int revisionNumber;
             int? parsedRevision = int.TryParse(revisionValue, out revisionNumber) ? revisionNumber : (int?)null;
             JObject changedFields = ParseEventDeltaChangedFields(changedFieldsJson);
+            bool hasAttachmentAdditions = bool.TryParse(
+                Environment.GetEnvironmentVariable("DEVOPSSYNC_EVENT_HAS_ATTACHMENT_ADDITIONS"),
+                out bool parsedHasAttachmentAdditions) && parsedHasAttachmentAdditions;
 
             return new EventDeltaOptions
             {
                 RevisionNumber = parsedRevision,
                 ChangedFieldsJson = changedFieldsJson,
                 ChangedFields = changedFields,
-                FieldNames = GetEventDeltaFieldNames(changedFieldsJson)
+                FieldNames = GetEventDeltaFieldNames(changedFieldsJson),
+                HasAttachmentAdditions = hasAttachmentAdditions
             };
         }
 

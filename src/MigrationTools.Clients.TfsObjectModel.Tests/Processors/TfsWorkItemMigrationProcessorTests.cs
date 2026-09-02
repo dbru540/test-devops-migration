@@ -39,6 +39,54 @@ namespace MigrationTools.Processors.Tests
             Assert.IsTrue(result.Succeeded);
         }
 
+        [TestMethod("TfsWorkItemMigrationProcessorTests_EventDelta_Parses_Attachment_Additions"), TestCategory("L0")]
+        public void EventDelta_Parses_Attachment_Additions()
+        {
+            Environment.SetEnvironmentVariable("DEVOPSSYNC_EVENT_REVISION", "42");
+            Environment.SetEnvironmentVariable("DEVOPSSYNC_EVENT_CHANGED_FIELDS_JSON", "{}");
+            Environment.SetEnvironmentVariable("DEVOPSSYNC_EVENT_HAS_ATTACHMENT_ADDITIONS", "true");
+            try
+            {
+                MethodInfo method = typeof(TfsWorkItemMigrationProcessor).GetMethod(
+                    "GetEventDeltaOptionsFromEnvironment",
+                    BindingFlags.NonPublic | BindingFlags.Static);
+
+                Assert.IsNotNull(method);
+                object options = method.Invoke(null, Array.Empty<object>());
+                PropertyInfo property = options.GetType().GetProperty("HasAttachmentAdditions");
+
+                Assert.IsNotNull(property);
+                Assert.IsTrue((bool)property.GetValue(options));
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("DEVOPSSYNC_EVENT_REVISION", null);
+                Environment.SetEnvironmentVariable("DEVOPSSYNC_EVENT_CHANGED_FIELDS_JSON", null);
+                Environment.SetEnvironmentVariable("DEVOPSSYNC_EVENT_HAS_ATTACHMENT_ADDITIONS", null);
+            }
+        }
+
+        [TestMethod("TfsWorkItemMigrationProcessorTests_EventDelta_Defaults_Attachment_Additions_To_False"), TestCategory("L0")]
+        public void EventDelta_Defaults_Attachment_Additions_To_False()
+        {
+            Environment.SetEnvironmentVariable("DEVOPSSYNC_EVENT_HAS_ATTACHMENT_ADDITIONS", "not-a-boolean");
+            try
+            {
+                MethodInfo method = typeof(TfsWorkItemMigrationProcessor).GetMethod(
+                    "GetEventDeltaOptionsFromEnvironment",
+                    BindingFlags.NonPublic | BindingFlags.Static);
+
+                object options = method.Invoke(null, Array.Empty<object>());
+                PropertyInfo property = options.GetType().GetProperty("HasAttachmentAdditions");
+
+                Assert.IsFalse((bool)property.GetValue(options));
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("DEVOPSSYNC_EVENT_HAS_ATTACHMENT_ADDITIONS", null);
+            }
+        }
+
         [TestMethod("TfsWorkItemMigrationProcessorTests_Antiloop_Uses_AuthorizedAs"), TestCategory("L0")]
         public void Antiloop_Uses_AuthorizedAs()
         {

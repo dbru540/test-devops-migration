@@ -13,7 +13,7 @@ namespace VstsSyncMigrator.ConsoleApp
 {
     public class Program
     {
-        public static async Task Main(string[] args)
+        public static async Task<int> Main(string[] args)
         {
             string binDirectory = AppDomain.CurrentDomain.BaseDirectory;
             string[] clientAssemblies = { "MigrationTools.Clients.TfsObjectModel.dll", "MigrationTools.Clients.FileSystem.dll", "MigrationTools.Clients.AzureDevops.Rest.dll" };
@@ -41,7 +41,7 @@ namespace VstsSyncMigrator.ConsoleApp
 
                 if (hostBuilder is null)
                 {
-                    return;
+                    return 1;
                 }
 
                 hostBuilder
@@ -71,6 +71,7 @@ namespace VstsSyncMigrator.ConsoleApp
                     }
                 }
                 catch { /* swallow any console IO exceptions (e.g., redirected output) */ }
+                return Environment.ExitCode;
             }
         }
 

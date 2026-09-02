@@ -21,6 +21,18 @@ using Serilog;
 namespace MigrationTools.Tools
 {
     /// <summary>
+    /// Summary of one attachment synchronization attempt.
+    /// </summary>
+    public sealed class AttachmentProcessingResult
+    {
+        public int Processed { get; internal set; }
+        public int Added { get; internal set; }
+        public int Skipped { get; internal set; }
+        public int Failed { get; internal set; }
+        public bool Succeeded => Failed == 0;
+    }
+
+    /// <summary>
     /// Tool for processing and migrating work item attachments between Team Foundation Server instances, handling file downloads, uploads, and attachment metadata.
     /// </summary>
     public class TfsAttachmentTool : Tool<TfsAttachmentToolOptions>
@@ -50,7 +62,7 @@ namespace MigrationTools.Tools
         /// <param name="save">Whether to save the target work item after processing attachments</param>
         // Modified ProcessAttachments method to pass all source attachments for counting
         // Update ProcessAttachments to pass all source attachments
-        public void ProcessAttachments(TfsProcessor processor, WorkItemData source, WorkItemData target, bool save = true)
+        public AttachmentProcessingResult ProcessAttachments(TfsProcessor processor, WorkItemData source, WorkItemData target, bool save = true)
         {
             Log.LogWarning("=== ATTACHMENT SYNC v3.0 - DEDUPLICATE (KEEP 1 COPY PER UNIQUE FILE) ===");
             Log.LogInformation("Starting ProcessAttachments for Source WI: {SourceId} -> Target WI: {TargetId}", 
@@ -79,14 +91,12 @@ namespace MigrationTools.Tools
             }
             Directory.CreateDirectory(_exportWiPath);
 
-            int count = 0;
-            int skipped = 0;
-            int added = 0;
+            var result = new AttachmentProcessingResult();
 
             // Process each attachment
             foreach (Attachment wia in sourceAttachments)
             {
-                count++;
+                result.Processed++;
 
                 try
                 {
@@ -97,20 +107,38 @@ namespace MigrationTools.Tools
 
                     if (filepath != null)
                     {
+                        if (new FileInfo(filepath).Length >= Options.MaxAttachmentSize)
+                        {
+                            result.Failed++;
+                            Log.LogError(
+                                "Attachment {AttachmentName} exceeds the configured limit of {MaxAttachmentSize} bytes",
+                                wia.Name,
+                                Options.MaxAttachmentSize);
+                            continue;
+                        }
+
                         // Pass all source attachments for counting
                         bool wasAdded = ImportAttachment(target.ToWorkItem(), wia, filepath, sourceAttachments);
                         if (wasAdded)
                         {
-                            added++;
+                            result.Added++;
                         }
                         else
                         {
-                            skipped++;
+                            result.Skipped++;
                         }
+                    }
+                    else
+                    {
+                        result.Failed++;
+                        Log.LogError(
+                            "Attachment export returned no file for source work item {SourceWorkItemId}",
+                            source.ToWorkItem().Id);
                     }
                 }
                 catch (Exception ex)
                 {
+                    result.Failed++;
                     Log.LogError(ex, "Unable to process attachment from source wi {SourceWorkItemId} called {AttachmentName}",
                         source.ToWorkItem().Id, wia.Name);
                     Telemetry.TrackException(ex, null);
@@ -120,10 +148,18 @@ namespace MigrationTools.Tools
             if (save)
             {
                 target.SaveToAzureDevOps();
-                Log.LogInformation("Attachment processing complete. Processed: {Processed}, Added: {Added}, Skipped: {Skipped}, Target now has {AttachmentCount} attachments",
-                    count, added, skipped, target.ToWorkItem().Attachments.Count);
                 CleanUpAfterSave();
             }
+
+            Log.LogInformation(
+                "Attachment processing complete. Processed: {Processed}, Added: {Added}, Skipped: {Skipped}, Failed: {Failed}, Target now has {AttachmentCount} attachments",
+                result.Processed,
+                result.Added,
+                result.Skipped,
+                result.Failed,
+                target.ToWorkItem().Attachments.Count);
+
+            return result;
         }
 
         /// <summary>
@@ -757,7 +793,7 @@ namespace MigrationTools.Tools
         /// <summary>
         /// Performs cleanup on both source and target, then syncs attachments
         /// </summary>
-        public void CleanupAndProcessAttachments(TfsProcessor processor, WorkItemData source, WorkItemData target, bool save = true)
+        public AttachmentProcessingResult CleanupAndProcessAttachments(TfsProcessor processor, WorkItemData source, WorkItemData target, bool save = true)
         {
             Log.LogWarning("=== CLEANUP AND SYNC PROCESS STARTING ===");
             Log.LogInformation("Processing Source WI: {SourceId} and Target WI: {TargetId}", source?.Id, target?.Id);
@@ -824,11 +860,12 @@ namespace MigrationTools.Tools
             
             // Step 4: Now run the normal sync process with clean attachment lists
             Log.LogWarning("STEP 3: Running normal attachment sync process");
-            ProcessAttachments(processor, source, target, save);
+            AttachmentProcessingResult result = ProcessAttachments(processor, source, target, save);
             
             Log.LogWarning("=== CLEANUP AND SYNC PROCESS COMPLETE ===");
             Log.LogInformation("Summary: Removed {SourceRemoved} duplicates from source, {TargetRemoved} from target", 
                 sourceRemoved, targetRemoved);
+            return result;
         }
 
         /// <summary>
@@ -872,7 +909,7 @@ namespace MigrationTools.Tools
         /// <summary>
         /// Main entry point - cleans up source duplicates first, then syncs to target
         /// </summary>
-        public void SmartProcessAttachments(TfsProcessor processor, WorkItemData source, WorkItemData target, bool save = true)
+        public AttachmentProcessingResult SmartProcessAttachments(TfsProcessor processor, WorkItemData source, WorkItemData target, bool save = true)
         {
             Log.LogWarning("=== SMART ATTACHMENT SYNC v3.0 - CLEANUP SOURCE + DEDUPLICATE ===");
 
@@ -959,9 +996,10 @@ namespace MigrationTools.Tools
 
             // STEP 3: Now run the normal sync process with clean attachment lists
             Log.LogWarning("STEP 3: Running attachment sync (deduplicate mode)");
-            ProcessAttachments(processor, source, target, save);
+            AttachmentProcessingResult result = ProcessAttachments(processor, source, target, save);
 
             Log.LogWarning("=== SMART ATTACHMENT SYNC COMPLETE ===");
+            return result;
         }
 
         /// <summary>
