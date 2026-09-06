@@ -1,3 +1,4 @@
+# Incomplete draft: no executable jobs. Kept outside workflows intentionally.
 name: Function Build & Release (Azure DevOps Migration Tools)
 
 permissions:
