@@ -22,8 +22,6 @@ namespace MigrationTools.Tools
 {
     public class TfsEmbededImagesTool : EmbededImagesRepairToolBase<TfsEmbededImagesToolOptions>
     {
-        private const string RegexPatternForImageUrl = "(?<=<img.*?src=\")[^\"]*";
-        private const string RegexPatternForImageFileName = "(?<=FileName=)[^=]*";
         private const string TargetDummyWorkItemTitle = "***** DELETE THIS - Migration Tool Generated Dummy Work Item For TfsEmbededImagesTool *****";
 
         private Project _targetProject;
@@ -182,75 +180,8 @@ namespace MigrationTools.Tools
 
                     string modifiedValue = originalValue;
                     
-                    // Try a more aggressive pattern to find ALL Azure DevOps URLs
-                    string pattern = @"https://dev\.azure\.com/[^/]+/[^""'\s<>]+";
-                    MatchCollection matches = Regex.Matches(originalValue, pattern);
-                    
-                    Log.LogWarning("Found {Count} Azure DevOps URLs in field {FieldName} ({RefName})", 
-                        matches.Count, field.Name, field.ReferenceName);
-                    
-                    foreach (Match match in matches)
-                    {
-                        string imageUrl = match.Value;
-                        
-                        // Clean up any HTML encoded characters
-                        imageUrl = System.Net.WebUtility.HtmlDecode(imageUrl);
-                        
-                        Log.LogWarning("Found URL: {Url}", imageUrl);
-                        
-                        // Extract organization
-                        string imageOrg = ExtractOrganization(imageUrl);
-                        Log.LogWarning("URL organization: {Org}, Target organization: {Target}", imageOrg, targetOrg);
-                        
-                        // Check if it's an attachment URL and from wrong org
-                        if (IsWrongOrganizationAttachmentUrl(imageUrl, targetOrg))
-                        {
-                            Log.LogWarning("WRONG ORG ATTACHMENT: {Url} is from {WrongOrg} but should be {CorrectOrg}",
-                                imageUrl, imageOrg, targetOrg);
-                            
-                            // Force replacement
-                            string cacheKey = $"{imageUrl}→{targetOrg}";
-                            string newImageLink = "";
-                            
-                            if (_cachedUploadedUrisBySourceValue.ContainsKey(cacheKey))
-                            {
-                                newImageLink = _cachedUploadedUrisBySourceValue[cacheKey];
-                            }
-                            else
-                            {
-                                try
-                                {
-                                    string downloadToken = DetermineAccessToken(imageUrl, sourcePersonalAccessToken);
-                                    newImageLink = UploadedAndRetrieveAttachmentLinkUrl(imageUrl, field.Name, wi, downloadToken);
-                                    
-                                    if (!string.IsNullOrWhiteSpace(newImageLink))
-                                    {
-                                        _cachedUploadedUrisBySourceValue[cacheKey] = newImageLink;
-                                        Log.LogInformation("Uploaded embedded image: New URL is {NewUrl}", newImageLink);
-                                    }
-                                }
-                                catch (Exception ex)
-                                {
-                                    Log.LogError(ex, "Failed to reupload image");
-                                    if (_ignore404Errors) continue;
-                                    throw;
-                                }
-                            }
-                            
-                            if (!string.IsNullOrWhiteSpace(newImageLink))
-                            {
-                                // Replace both the original URL and any HTML-encoded version
-                                modifiedValue = modifiedValue.Replace(match.Value, newImageLink);
-                                modifiedValue = modifiedValue.Replace(System.Net.WebUtility.HtmlEncode(match.Value), newImageLink);
-                                Log.LogInformation("Replaced embedded image URL in content: {Old} -> {New}", imageUrl, newImageLink);
-                            }
-                        }
-                        else if (IsAzureDevOpsUrlFromWrongOrganization(imageUrl, targetOrg))
-                        {
-                            // Not an attachment but still wrong org
-                            Log.LogWarning("Found non-attachment URL from wrong org: {Url}", imageUrl);
-                        }
-                    }
+                    modifiedValue = RewriteAttachmentLinks(originalValue, oldTfsurl, newTfsurl,
+                        field.Name, wi, sourcePersonalAccessToken);
                     
                     // Update field if changed
                     if (modifiedValue != originalValue)
@@ -265,6 +196,7 @@ namespace MigrationTools.Tools
                 {
                     Log.LogError(ex, "Error processing field {FieldName} ({RefName})", 
                         field.Name, field.ReferenceName);
+                    throw;
                 }
             }
             
@@ -350,26 +282,79 @@ namespace MigrationTools.Tools
                 && !imageOrg.Equals(targetOrg, StringComparison.OrdinalIgnoreCase);
         }
 
+        /// <summary>Rewrite only configured source attachments; same-org URLs are reusable.</summary>
+        protected string RewriteAttachmentLinks(string html, string sourceCollection, string targetCollection,
+            string fieldName, WorkItemData target, string sourceToken)
+        {
+            string sourceOrg = ExtractOrganization(sourceCollection);
+            string targetOrg = ExtractOrganization(targetCollection);
+            if (string.IsNullOrEmpty(sourceOrg) || string.IsNullOrEmpty(targetOrg))
+                return html; // Preserve non-Azure/on-premises behavior.
+            string rewritten = html;
+            var matches = Regex.Matches(html ?? "", @"https://(?:dev\.azure\.com/[^/]+|[a-z0-9-]+\.visualstudio\.com)/[^""'\s<>]+", RegexOptions.IgnoreCase);
+            foreach (Match match in matches)
+            {
+                string uri = WebUtility.HtmlDecode(match.Value);
+                if (!IsWrongOrganizationAttachmentUrl(uri, targetOrg)) continue;
+                if (!ExtractOrganization(uri).Equals(sourceOrg, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("Embedded attachment is outside the configured organizations");
+                string key = uri + "→" + targetOrg;
+                if (!_cachedUploadedUrisBySourceValue.TryGetValue(key, out string uploaded))
+                {
+                    uploaded = UploadedAndRetrieveAttachmentLinkUrl(uri, fieldName, target, sourceToken);
+                    if (string.IsNullOrWhiteSpace(uploaded)) continue; // Legacy explicit 404 policy.
+                    if (!Uri.TryCreate(uploaded, UriKind.Absolute, out Uri uploadedUri) || uploadedUri.Scheme != "https" ||
+                        !IsAzureDevOpsAttachmentUrl(uploaded) ||
+                        !ExtractOrganization(uploaded).Equals(targetOrg, StringComparison.OrdinalIgnoreCase))
+                        throw new InvalidOperationException("Uploaded attachment URL is outside the target organization");
+                    _cachedUploadedUrisBySourceValue[key] = uploaded;
+                }
+                rewritten = rewritten.Replace(match.Value, uploaded);
+            }
+            return rewritten;
+        }
+
+        /// <summary>Network seam for deterministic offline transfer tests.</summary>
+        protected virtual HttpClient CreateImageDownloadClient()
+        {
+            return new HttpClient(new HttpClientHandler
+            {
+                AllowAutoRedirect = true, MaxAutomaticRedirections = 5,
+                AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate,
+                UseDefaultCredentials = false
+            }) { Timeout = TimeSpan.FromMinutes(2) };
+        }
+
+        /// <summary>The production implementation retains SDK attachment visibility handling.</summary>
+        protected virtual string UploadDownloadedImage(WorkItemData target, string filePath)
+        {
+            return UploadImageToTarget(target.ToWorkItem(), filePath)?.Url;
+        }
+
+        private static string SafeImageFileName(string uri)
+        {
+            string name = null;
+            foreach (string part in new Uri(uri).Query.TrimStart('?').Split('&'))
+            {
+                var pair = part.Split(new[] { '=' }, 2);
+                if (pair.Length == 2 && pair[0].Equals("fileName", StringComparison.OrdinalIgnoreCase))
+                    name = Uri.UnescapeDataString(pair[1].Replace("+", " "));
+            }
+            name = Path.GetFileName((name ?? "").Replace('\\', '/'));
+            foreach (char invalid in Path.GetInvalidFileNameChars()) name = name.Replace(invalid, '_');
+            return string.IsNullOrWhiteSpace(name) || name == "." || name == ".." ? "image.bin" : name;
+        }
+
         private string UploadedAndRetrieveAttachmentLinkUrl(string matchedSourceUri, string sourceFieldName, WorkItemData targetWorkItem, string sourcePersonalAccessToken)
         {
-            Match newFileNameMatch = Regex.Match(matchedSourceUri, RegexPatternForImageFileName, RegexOptions.IgnoreCase);
-            if (!newFileNameMatch.Success) return null;
-
             Log.LogDebug("EmbededImagesRepairEnricher: field '{fieldName}' has match: {matchValue}", sourceFieldName, WebUtility.HtmlDecode(matchedSourceUri));
-            string fullImageFilePath = Path.GetTempPath() + newFileNameMatch.Value;
+            string temporaryDirectory = Path.Combine(Path.GetTempPath(), "devopssync-image-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(temporaryDirectory);
+            string fullImageFilePath = Path.Combine(temporaryDirectory, SafeImageFileName(matchedSourceUri));
 
             try
             {
-                // Create a handler that allows redirects
-                var handler = new HttpClientHandler
-                {
-                    AllowAutoRedirect = true,
-                    MaxAutomaticRedirections = 5,
-                    AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate,
-                    UseDefaultCredentials = false
-                };
-
-                using (var httpClient = new HttpClient(handler))
+                using (var httpClient = CreateImageDownloadClient())
                 {
                     httpClient.Timeout = TimeSpan.FromMinutes(2);
                     
@@ -421,13 +406,6 @@ namespace MigrationTools.Tools
                             // More detailed error logging
                             LogAuthenticationError(matchedSourceUri, accessToken);
                             
-                            // Option to skip on auth errors if configured
-                            if (_ignore404Errors) // You might want a separate flag for auth errors
-                            {
-                                Log.LogWarning("Skipping image due to authentication error: {Uri}", matchedSourceUri);
-                                return null;
-                            }
-                            
                             result.EnsureSuccessStatusCode();
                         }
                         else
@@ -443,27 +421,22 @@ namespace MigrationTools.Tools
                 if (!File.Exists(fullImageFilePath) || new FileInfo(fullImageFilePath).Length == 0)
                 {
                     Log.LogError("Downloaded file is empty or doesn't exist: {FilePath}", fullImageFilePath);
-                    return null;
+                    throw new IOException("Embedded image download returned an empty file");
                 }
 
                 var imageBytes = File.ReadAllBytes(fullImageFilePath);
                 if (GetImageFormat(imageBytes) == ImageFormat.unknown)
                 {
-                    // Log first few bytes to debug
-                    var firstBytes = imageBytes.Take(100).ToArray();
-                    var content = Encoding.UTF8.GetString(firstBytes);
-                    Log.LogError("Not an image. First 100 bytes: {Content}", content);
-                    
                     throw new Exception($"Downloaded content is not a valid image. Might be an auth page.");
                 }
 
-                var attachRef = UploadImageToTarget(targetWorkItem.ToWorkItem(), fullImageFilePath);
-                if (attachRef == null)
+                string uploaded = UploadDownloadedImage(targetWorkItem, fullImageFilePath);
+                if (string.IsNullOrWhiteSpace(uploaded))
                 {
                     throw new Exception($"Unable to upload the image [{fullImageFilePath}].");
                 }
 
-                return attachRef.Url;
+                return uploaded;
             }
             catch (Exception ex)
             {
@@ -476,6 +449,7 @@ namespace MigrationTools.Tools
                 {
                     try { File.Delete(fullImageFilePath); } catch { }
                 }
+                try { Directory.Delete(temporaryDirectory); } catch { }
             }
         }
 
@@ -494,7 +468,7 @@ namespace MigrationTools.Tools
             string pathOrg = "";
             
             // Extract organization from URL
-            if (host.Contains("dev.azure.com"))
+            if (host.Equals("dev.azure.com", StringComparison.OrdinalIgnoreCase))
             {
                 // Format: https://dev.azure.com/{organization}/
                 var segments = uri.Segments;
@@ -503,7 +477,7 @@ namespace MigrationTools.Tools
                     pathOrg = segments[1].Trim('/').ToLower();
                 }
             }
-            else if (host.Contains("visualstudio.com"))
+            else if (host.EndsWith(".visualstudio.com", StringComparison.OrdinalIgnoreCase))
             {
                 // Format: https://{organization}.visualstudio.com/
                 pathOrg = host.Split('.')[0].ToLower();
@@ -567,7 +541,7 @@ namespace MigrationTools.Tools
             Uri uri = new Uri(collectionUrl);
             string host = uri.Host.ToLower();
             
-            if (host.Contains("dev.azure.com"))
+            if (host.Equals("dev.azure.com", StringComparison.OrdinalIgnoreCase))
             {
                 // Format: https://dev.azure.com/{organization}/
                 var segments = uri.Segments;
@@ -576,7 +550,7 @@ namespace MigrationTools.Tools
                     return segments[1].Trim('/').ToLower();
                 }
             }
-            else if (host.Contains("visualstudio.com"))
+            else if (host.EndsWith(".visualstudio.com", StringComparison.OrdinalIgnoreCase))
             {
                 // Format: https://{organization}.visualstudio.com/
                 return host.Split('.')[0].ToLower();
@@ -593,6 +567,7 @@ namespace MigrationTools.Tools
             Log.LogError("Authentication failed for URL: {Url}", url);
             Log.LogError("Organization detected: {Org}", org);
             Log.LogError("Token was {TokenStatus}", string.IsNullOrEmpty(tokenInfo) ? "NOT PROVIDED" : "PROVIDED");
+            if (_processor == null) return;
             
             string sourceOrg = ExtractOrganization(_processor.Source.Options.Collection.ToString());
             string targetOrg = ExtractOrganization(_processor.Target.Options.Collection.ToString());

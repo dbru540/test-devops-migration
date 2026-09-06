@@ -15,10 +15,6 @@
     <PackageRequireLicenseAcceptance>true</PackageRequireLicenseAcceptance>
   </PropertyGroup>
 
-  <ItemGroup>
-    <NuGetAuditSuppress Include="*" />
-  </ItemGroup>
-
   <PropertyGroup>
     <GitVersion>false</GitVersion>
   </PropertyGroup>
