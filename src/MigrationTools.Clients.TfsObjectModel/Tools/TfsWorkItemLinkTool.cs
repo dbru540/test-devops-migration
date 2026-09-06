@@ -76,6 +76,16 @@ namespace MigrationTools.Tools
         /// <exception cref="ArgumentNullException">Thrown when source or target work items are null</exception>
         public  int Enrich(TfsProcessor processor, WorkItemData sourceWorkItemLinkStart, WorkItemData targetWorkItemLinkStart)
         {
+            return Enrich(processor, sourceWorkItemLinkStart, targetWorkItemLinkStart, false);
+        }
+
+        /// <summary>
+        /// Incremental synchronization checks link identities regardless of counts.
+        /// Existing target parents are preserved if an incremental update conflicts.
+        /// </summary>
+        public int Enrich(TfsProcessor processor, WorkItemData sourceWorkItemLinkStart,
+            WorkItemData targetWorkItemLinkStart, bool forceLinkValidation)
+        {
             if (sourceWorkItemLinkStart is null)
             {
                 throw new ArgumentNullException(nameof(sourceWorkItemLinkStart));
@@ -90,7 +100,7 @@ namespace MigrationTools.Tools
                 return 0;
             }
 
-            if (ShouldCopyLinks(sourceWorkItemLinkStart, targetWorkItemLinkStart))
+            if (forceLinkValidation || ShouldCopyLinks(sourceWorkItemLinkStart, targetWorkItemLinkStart))
             {
                 Log.LogTrace("Links = '{@sourceWorkItemLinkStartLinks}", sourceWorkItemLinkStart.Links);
                 foreach (Link item in sourceWorkItemLinkStart.ToWorkItem().Links)
@@ -105,7 +115,7 @@ namespace MigrationTools.Tools
                         else if (IsRelatedLink(item))
                         {
                             RelatedLink rl = (RelatedLink)item;
-                            CreateRelatedLink(processor, sourceWorkItemLinkStart, rl, targetWorkItemLinkStart);
+                            CreateRelatedLink(processor, sourceWorkItemLinkStart, rl, targetWorkItemLinkStart, forceLinkValidation);
                         }
                         else if (IsExternalLink(item))
                         {
@@ -124,18 +134,21 @@ namespace MigrationTools.Tools
                     }
                     catch (WorkItemLinkValidationException ex)
                     {
+                        if (forceLinkValidation) throw;
                         sourceWorkItemLinkStart.ToWorkItem().Reset();
                         targetWorkItemLinkStart.ToWorkItem().Reset();
                         Log.LogError(ex, "[WorkItemLinkValidationException] Adding link for wiSourceL={sourceWorkItemLinkStartId}", sourceWorkItemLinkStart.Id);
                     }
                     catch (FormatException ex)
                     {
+                        if (forceLinkValidation) throw;
                         sourceWorkItemLinkStart.ToWorkItem().Reset();
                         targetWorkItemLinkStart.ToWorkItem().Reset();
                         Log.LogError(ex, "[CREATE-FAIL] Adding Link for wiSourceL={sourceWorkItemLinkStartId}", sourceWorkItemLinkStart.Id);
                     }
                     catch (UnexpectedErrorException ex)
                     {
+                        if (forceLinkValidation) throw;
                         sourceWorkItemLinkStart.ToWorkItem().Reset();
                         targetWorkItemLinkStart.ToWorkItem().Reset();
                         Log.LogError(ex, "[UnexpectedErrorException] Adding Link for wiSourceL={sourceWorkItemLinkStartId}", sourceWorkItemLinkStart.Id);
@@ -288,7 +301,7 @@ namespace MigrationTools.Tools
                    link.LinkedArtifactUri.StartsWith("vstfs:///Build/Build/", StringComparison.InvariantCultureIgnoreCase);
         }
 
-        private void CreateRelatedLink(TfsProcessor processor, WorkItemData wiSourceL, RelatedLink item, WorkItemData wiTargetL)
+        private void CreateRelatedLink(TfsProcessor processor, WorkItemData wiSourceL, RelatedLink item, WorkItemData wiTargetL, bool preserveExistingParents)
         {
             RelatedLink rl = item;
             WorkItemData wiSourceR = null;
@@ -362,6 +375,7 @@ namespace MigrationTools.Tools
                                     select (RelatedLink)l).SingleOrDefault();
                             if (potentialParentConflictLink != null)
                             {
+                                EnsureParentReplacementAllowed(preserveExistingParents, potentialParentConflictLink.RelatedWorkItemId, int.Parse(wiTargetL.Id));
                                 wiTargetR.ToWorkItem().Links.Remove(potentialParentConflictLink);
                             }
                             linkTypeEnd = ((TfsWorkItemMigrationClient)processor.Target.WorkItems).Store.WorkItemLinkTypes.LinkTypeEnds["System.LinkTypes.Hierarchy-Reverse"];
@@ -384,6 +398,7 @@ namespace MigrationTools.Tools
                                     select (RelatedLink)l).SingleOrDefault();
                                 if (potentialParentConflictLink != null)
                                 {
+                                    EnsureParentReplacementAllowed(preserveExistingParents, potentialParentConflictLink.RelatedWorkItemId, int.Parse(wiTargetR.Id));
                                     wiTargetL.ToWorkItem().Links.Remove(potentialParentConflictLink);
                                 }
                             }
@@ -425,6 +440,15 @@ namespace MigrationTools.Tools
             {
                 Log.LogWarning("[SKIP] [LINK_CAPTURE_RELATED] [{RegisteredLinkType}] target not found. wiSourceL={wiSourceL}, wiSourceR={wiSourceR}, wiTargetL={wiTargetL}", rl.ArtifactLinkType.GetType().Name, wiSourceL == null ? "null" : wiSourceL.Id, wiSourceR == null ? "null" : wiSourceR.Id, wiTargetL == null ? "null" : wiTargetL.Id);
                 _failedLinks.Add(new FailedLinkInfo { SourceId = wiSourceL?.Id ?? "null", TargetId = wiSourceR?.Id ?? "null", LinkType = rl.ArtifactLinkType.GetType().Name, Reason = "Target work item not found" });
+            }
+        }
+
+        private static void EnsureParentReplacementAllowed(bool preserveExistingParents, int existingParent, int requestedParent)
+        {
+            if (preserveExistingParents && existingParent != requestedParent)
+            {
+                throw new InvalidOperationException(
+                    $"Link synchronization conflict: target parent {existingParent} differs from requested parent {requestedParent}; no parent was replaced.");
             }
         }
 

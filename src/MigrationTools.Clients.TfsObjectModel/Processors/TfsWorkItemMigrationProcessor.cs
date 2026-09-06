@@ -798,7 +798,6 @@ namespace MigrationTools.Processors
                             if (revisionsToMigrate.Count == 0)
                             {
                                 ProcessWorkItemAttachments(sourceWorkItem, targetWorkItem, false);
-                                ProcessWorkItemLinks(sourceWorkItem, targetWorkItem);
                                 ProcessHTMLFieldAttachements(targetWorkItem);
                                 ProcessWorkItemEmbeddedLinks(sourceWorkItem, targetWorkItem);
                                 CommonTools.FieldMappingTool.ApplyFieldMappings(sourceWorkItem, targetWorkItem);
@@ -815,6 +814,9 @@ namespace MigrationTools.Processors
                                 targetWorkItem = ReplayRevisions(revisionsToMigrate, sourceWorkItem, targetWorkItem);
                             }
                         }
+                        // Relations are not revision-owned fields. Process them even
+                        // for a links-only delta and when no fields were replayed.
+                        ProcessWorkItemLinks(sourceWorkItem, targetWorkItem, eventDelta.HasPayload);
                         if (targetWorkItem != null && targetWorkItem.ToWorkItem().IsDirty)
                         {
                             targetWorkItem.SaveToAzureDevOps();
@@ -930,12 +932,12 @@ namespace MigrationTools.Processors
             return new AttachmentProcessingResult();
         }
 
-        private void ProcessWorkItemLinks(WorkItemData sourceWorkItem, WorkItemData targetWorkItem)
+        private void ProcessWorkItemLinks(WorkItemData sourceWorkItem, WorkItemData targetWorkItem, bool forceLinkValidation = false)
         {
             if (targetWorkItem != null && CommonTools.WorkItemLink.Enabled && sourceWorkItem.ToWorkItem().Links.Count > 0)
             {
                 TraceWriteLine(LogEventLevel.Information, "Links {SourceWorkItemLinkCount} | LinkMigrator:{LinkMigration}", new Dictionary<string, object>() { { "SourceWorkItemLinkCount", sourceWorkItem.ToWorkItem().Links.Count }, { "LinkMigration", CommonTools.WorkItemLink.Enabled } });
-                CommonTools.WorkItemLink.Enrich(this, sourceWorkItem, targetWorkItem);
+                CommonTools.WorkItemLink.Enrich(this, sourceWorkItem, targetWorkItem, forceLinkValidation);
                 //AddMetric("RelatedLinkCount", processWorkItemMetrics, targetWorkItem.ToWorkItem().Links.Count);
                 int fixedLinkCount = CommonTools.GitRepository.Enrich(this, sourceWorkItem, targetWorkItem);
                 // AddMetric("FixedGitLinkCount", processWorkItemMetrics, fixedLinkCount);
