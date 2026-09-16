@@ -1273,6 +1273,11 @@ namespace MigrationTools.Processors
             string changedFieldsJson = DecodeEventDeltaChangedFieldsJson(
                 Environment.GetEnvironmentVariable("DEVOPSSYNC_EVENT_CHANGED_FIELDS_JSON_BASE64"),
                 Environment.GetEnvironmentVariable("DEVOPSSYNC_EVENT_CHANGED_FIELDS_JSON"));
+            string fieldsFile = Environment.GetEnvironmentVariable("DEVOPSSYNC_EVENT_CHANGED_FIELDS_FILE");
+            if (!string.IsNullOrWhiteSpace(fieldsFile))
+            {
+                changedFieldsJson = ReadEventDeltaFile(fieldsFile);
+            }
 
             int revisionNumber;
             int? parsedRevision = int.TryParse(revisionValue, out revisionNumber) ? revisionNumber : (int?)null;
@@ -1289,6 +1294,16 @@ namespace MigrationTools.Processors
                 FieldNames = GetEventDeltaFieldNames(changedFieldsJson),
                 HasAttachmentAdditions = hasAttachmentAdditions
             };
+        }
+
+        private static string ReadEventDeltaFile(string path)
+        {
+            var file = new System.IO.FileInfo(path);
+            if (!file.Exists || file.Length > 8 * 1024 * 1024)
+                throw new InvalidOperationException("Event delta file missing or too large");
+            string json = System.IO.File.ReadAllText(path, Encoding.UTF8);
+            JObject.Parse(json); // Fail closed instead of falling back to unrestricted replay.
+            return json;
         }
 
         private static string DecodeEventDeltaChangedFieldsJson(string changedFieldsJsonBase64, string changedFieldsJson)
@@ -1957,79 +1972,26 @@ namespace MigrationTools.Processors
             }
             catch (Exception ex)
             {
-                TraceWriteLine(LogEventLevel.Warning, "Comment sync failed for {TargetWorkItemId}: {ErrorMessage}",
+                TraceWriteLine(LogEventLevel.Error, "Comment sync failed for {TargetWorkItemId}: {ErrorMessage}",
                     new Dictionary<string, object>() { { "TargetWorkItemId", targetWorkItem.Id }, { "ErrorMessage", ex.Message } });
+                throw new InvalidOperationException("Comment synchronization failed", ex);
             }
         }
 
+        private readonly IDictionary<string, string> _commentAttachmentCache = new Dictionary<string, string>();
+
         private string RewriteCommentImagesForTarget(string commentHtml, int targetWorkItemId)
         {
-            if (string.IsNullOrWhiteSpace(commentHtml)) return commentHtml;
-
-            string sourceOrg = Source.Options.Collection.AbsoluteUri.TrimEnd('/');
-            string sourcePat = Source.Options.Authentication.AccessToken;
-            string targetPat = Target.Options.Authentication.AccessToken;
-            string targetBaseUri = Target.Options.Collection.AbsoluteUri.TrimEnd('/');
-            string targetProject = Uri.EscapeDataString(Target.Options.Project);
-
-            // Match attachment URLs from source org
-            var attachmentRegex = new System.Text.RegularExpressions.Regex(
-                @"https?://dev\.azure\.com/[^""'\s]+/_apis/wit/attachments/[^""'\s]+",
-                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-
-            var matches = attachmentRegex.Matches(commentHtml);
-            if (matches.Count == 0) return commentHtml;
-
-            using (var downloadClient = new HttpClient { Timeout = TimeSpan.FromMinutes(2) })
+            using (var download = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = TimeSpan.FromMinutes(2) })
+            using (var upload = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = TimeSpan.FromMinutes(2) })
             {
-                downloadClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
-                    "Basic", Convert.ToBase64String(Encoding.ASCII.GetBytes($":{sourcePat}")));
-
-                using (var uploadClient = new HttpClient { Timeout = TimeSpan.FromMinutes(2) })
-                {
-                    uploadClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
-                        "Basic", Convert.ToBase64String(Encoding.ASCII.GetBytes($":{targetPat}")));
-
-                    foreach (System.Text.RegularExpressions.Match match in matches)
-                    {
-                        string originalUrl = WebUtility.HtmlDecode(match.Value);
-                        // Only rewrite URLs from the source org
-                        if (originalUrl.IndexOf(sourceOrg, StringComparison.OrdinalIgnoreCase) < 0 &&
-                            !originalUrl.ToLowerInvariant().Contains(Source.Options.Collection.Host.ToLowerInvariant()))
-                            continue;
-
-                        try
-                        {
-                            // Download from source
-                            var imageBytes = downloadClient.GetByteArrayAsync(originalUrl).Result;
-                            // Extract filename from URL
-                            var fileNameMatch = System.Text.RegularExpressions.Regex.Match(originalUrl, @"fileName=([^&\s]+)");
-                            string fileName = fileNameMatch.Success ? fileNameMatch.Groups[1].Value : "image.png";
-
-                            // Upload to target
-                            string uploadUrl = $"{targetBaseUri}/{targetProject}/_apis/wit/attachments?fileName={Uri.EscapeDataString(fileName)}&api-version=7.1";
-                            using (var uploadContent = new ByteArrayContent(imageBytes))
-                            {
-                                uploadContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
-                                var uploadResponse = uploadClient.PostAsync(uploadUrl, uploadContent).Result;
-                                uploadResponse.EnsureSuccessStatusCode();
-                                var responseJson = Newtonsoft.Json.Linq.JObject.Parse(uploadResponse.Content.ReadAsStringAsync().Result);
-                                string newUrl = responseJson["url"]?.ToString();
-                                if (!string.IsNullOrEmpty(newUrl))
-                                {
-                                    commentHtml = commentHtml.Replace(match.Value, newUrl);
-                                    commentHtml = commentHtml.Replace(WebUtility.HtmlEncode(match.Value), newUrl);
-                                }
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-                            Log.LogWarning("Failed to rewrite image {Url} in comment: {Error}", originalUrl, ex.Message);
-                        }
-                    }
-                }
+                download.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic",
+                    Convert.ToBase64String(Encoding.ASCII.GetBytes(":" + Source.Options.Authentication.AccessToken)));
+                upload.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic",
+                    Convert.ToBase64String(Encoding.ASCII.GetBytes(":" + Target.Options.Authentication.AccessToken)));
+                return CommentImageTransfer.Rewrite(commentHtml, Source.Options.Collection.AbsoluteUri,
+                    Target.Options.Collection.AbsoluteUri, Target.Options.Project, download, upload, _commentAttachmentCache);
             }
-            return commentHtml;
         }
 
         private async Task PostCommentViaApiAsync(int targetWorkItemId, string commentHtml, string originalAuthor = null)
