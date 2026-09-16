@@ -97,6 +97,30 @@ namespace MigrationTools.Clients.TfsObjectModel.Tests.Tools
         }
 
         [TestMethod, TestCategory("L0")]
+        public void SameOrganizationDifferentProjectsStillCopiesImageForTargetPermissions()
+        {
+            var handler = new Handler { Respond = req => req.Method == HttpMethod.Get
+                ? new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(Png) }
+                : new HttpResponseMessage(HttpStatusCode.Created) { Content = new StringContent("{\"url\":\"" + Original + "\"}") } };
+            using (var client = new HttpClient(handler))
+            {
+                CommentImageTransfer.Rewrite("<img src='"+Original+"'>", Source, Source, "OtherProject", client, client, new Dictionary<string,string>());
+                Assert.AreEqual(2, handler.Count);
+            }
+        }
+
+        [TestMethod, TestCategory("L0")]
+        public void LiteralDataUriInPlainTextIsNotTreatedAsAnImage()
+        {
+            var handler = new Handler { Respond = _ => throw new Exception("No request expected") };
+            using (var client = new HttpClient(handler))
+            {
+                string text = "Example: data:image/png;base64,not-a-real-image";
+                Assert.AreEqual(text, CommentImageTransfer.Rewrite(text, Source, Target, "P", client, client, new Dictionary<string,string>()));
+            }
+        }
+
+        [TestMethod, TestCategory("L0")]
         public void UnsafeUploadResponseAndInvalidInlineImageFail()
         {
             var handler = new Handler { Respond = _ => new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{\"url\":\"https://evil.invalid/image\"}") } };

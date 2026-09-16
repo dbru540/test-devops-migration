@@ -45,8 +45,11 @@ namespace MigrationTools.Tools
             {
                 string original = WebUtility.HtmlDecode(match.Value);
                 if (original.IndexOf("/_apis/wit/attachments/", StringComparison.OrdinalIgnoreCase) < 0) continue;
-                if (IsAttachmentInOrganization(original, targetCollection)) continue;
-                if (!IsAttachmentInOrganization(original, sourceCollection)) throw new InvalidOperationException("Comment attachment outside configured organizations");
+                if (!IsAttachmentInOrganization(original, sourceCollection))
+                {
+                    if (IsAttachmentInOrganization(original, targetCollection)) continue;
+                    throw new InvalidOperationException("Comment attachment outside configured organizations");
+                }
                 string key = targetCollection + "|" + original;
                 if (!cache.TryGetValue(key, out string replacement))
                 {
@@ -74,21 +77,21 @@ namespace MigrationTools.Tools
                 }
                 result = result.Replace(match.Value, replacement);
             }
-            var inlineImages = Regex.Matches(result, @"data:image/(png|jpeg|gif|webp);base64,([A-Za-z0-9+/=\r\n]+)", RegexOptions.IgnoreCase);
+            var inlineImages = Regex.Matches(result, @"<img\b[^>]*\bsrc\s*=\s*[""'](?<data>data:image/(?<type>png|jpeg|gif|webp);base64,(?<bytes>[A-Za-z0-9+/=\r\n]+))[""']", RegexOptions.IgnoreCase);
             foreach (Match match in inlineImages)
             {
-                byte[] bytes = Convert.FromBase64String(match.Groups[2].Value);
-                if (bytes.Length == 0 || bytes.Length > MaxImageBytes || !HasImageSignature(bytes, match.Groups[1].Value.ToLowerInvariant()))
+                byte[] bytes = Convert.FromBase64String(match.Groups["bytes"].Value);
+                if (bytes.Length == 0 || bytes.Length > MaxImageBytes || !HasImageSignature(bytes, match.Groups["type"].Value.ToLowerInvariant()))
                     throw new InvalidOperationException("Invalid inline comment image");
                 string key = targetCollection + "|inline|" + Hash(bytes);
                 if (!cache.TryGetValue(key, out string replacement))
                 {
-                    replacement = Upload(bytes, targetCollection, project, upload, match.Groups[1].Value);
+                    replacement = Upload(bytes, targetCollection, project, upload, match.Groups["type"].Value);
                     cache[key] = replacement;
                 }
-                result = result.Replace(match.Value, replacement);
+                result = result.Replace(match.Groups["data"].Value, replacement);
             }
-            if (result.IndexOf("data:image/", StringComparison.OrdinalIgnoreCase) >= 0)
+            if (Regex.IsMatch(result, @"<img\b[^>]*\bsrc\s*=\s*[""']data:image/", RegexOptions.IgnoreCase))
                 throw new InvalidOperationException("Unsupported inline comment image encoding");
             return result;
         }
