@@ -122,6 +122,22 @@ namespace MigrationTools.Clients.TfsObjectModel.Tests.Tools
         }
 
         [TestMethod, TestCategory("L0")]
+        public void AttachmentHyperlinkPreservesOriginalFilenameAndExtension()
+        {
+            var handler = new Handler { Respond = req => {
+                if (req.Method == HttpMethod.Get) return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(new byte[] {80,75,3,4}) };
+                StringAssert.Contains(req.RequestUri.ToString(), "fileName=fields.xlsx&api-version=");
+                return new HttpResponseMessage(HttpStatusCode.Created) { Content = new StringContent("{\"url\":\""+Uploaded+"\"}") };
+            }};
+            using (var client = new HttpClient(handler))
+            {
+                string url = Source + "/P/_apis/wit/attachments/id?fileName=..%2Ffields.xlsx";
+                string result = CommentImageTransfer.Rewrite("<a href='"+url+"'>fields.xlsx</a>", Source, Target, "P", client, client, new Dictionary<string,string>());
+                StringAssert.Contains(result, Uploaded);
+            }
+        }
+
+        [TestMethod, TestCategory("L0")]
         public void UnsafeUploadResponseAndInvalidInlineImageFail()
         {
             var handler = new Handler { Respond = _ => new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{\"url\":\"https://evil.invalid/image\"}") } };

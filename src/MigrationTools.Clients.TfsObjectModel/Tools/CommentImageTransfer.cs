@@ -72,7 +72,12 @@ namespace MigrationTools.Tools
                             if (output.Length == 0) throw new InvalidOperationException("Empty comment attachment");
                             byte[] bytes = output.ToArray();
                             string extension = new[] { "png", "jpeg", "gif", "webp" }.FirstOrDefault(type => HasImageSignature(bytes, type)) ?? "bin";
-                            replacement = Upload(bytes, targetCollection, project, upload, extension);
+                            var nameMatch = Regex.Match(new Uri(original).Query, @"(?:\?|&)fileName=([^&]+)", RegexOptions.IgnoreCase);
+                            string fileName = nameMatch.Success ? Uri.UnescapeDataString(nameMatch.Groups[1].Value)
+                                : response.Content.Headers.ContentDisposition?.FileNameStar ?? response.Content.Headers.ContentDisposition?.FileName;
+                            if (!string.IsNullOrWhiteSpace(fileName))
+                                fileName = fileName.Trim('"').Replace('\\', '/').Split('/').Last();
+                            replacement = Upload(bytes, targetCollection, project, upload, extension, fileName);
                         }
                     }
                     cache[key] = replacement;
@@ -111,9 +116,10 @@ namespace MigrationTools.Tools
             using (var sha = SHA256.Create()) return BitConverter.ToString(sha.ComputeHash(bytes)).Replace("-", "").ToLowerInvariant();
         }
 
-        private static string Upload(byte[] bytes, string target, string project, HttpClient client, string extension)
+        private static string Upload(byte[] bytes, string target, string project, HttpClient client, string extension, string originalName = null)
         {
-            string url = target.TrimEnd('/') + "/" + Uri.EscapeDataString(project) + "/_apis/wit/attachments?fileName=comment-" + Hash(bytes) + "." + extension + "&api-version=7.1";
+            string name = string.IsNullOrWhiteSpace(originalName) ? "comment-" + Hash(bytes) + "." + extension : originalName;
+            string url = target.TrimEnd('/') + "/" + Uri.EscapeDataString(project) + "/_apis/wit/attachments?fileName=" + Uri.EscapeDataString(name) + "&api-version=7.1";
             using (var content = new ByteArrayContent(bytes))
             {
                 content.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
