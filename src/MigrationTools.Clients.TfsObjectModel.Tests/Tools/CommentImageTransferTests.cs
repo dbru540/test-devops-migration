@@ -40,6 +40,7 @@ namespace MigrationTools.Clients.TfsObjectModel.Tests.Tools
             var upload = new Handler { Respond = req => {
                 CollectionAssert.AreEqual(Png, req.Content.ReadAsByteArrayAsync().Result);
                 StringAssert.StartsWith(req.RequestUri.ToString(), Target + "/P/_apis/wit/attachments?");
+                StringAssert.Contains(req.RequestUri.ToString(), ".png&api-version=");
                 return new HttpResponseMessage(HttpStatusCode.Created) { Content = new StringContent("{\"url\":\"" + Uploaded + "\"}") };
             }};
             using (var a = new HttpClient(download)) using (var b = new HttpClient(upload))

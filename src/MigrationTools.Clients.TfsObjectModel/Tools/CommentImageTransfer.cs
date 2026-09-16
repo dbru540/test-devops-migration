@@ -70,7 +70,9 @@ namespace MigrationTools.Tools
                                 output.Write(buffer, 0, count);
                             }
                             if (output.Length == 0) throw new InvalidOperationException("Empty comment attachment");
-                            replacement = Upload(output.ToArray(), targetCollection, project, upload, "attachment");
+                            byte[] bytes = output.ToArray();
+                            string extension = new[] { "png", "jpeg", "gif", "webp" }.FirstOrDefault(type => HasImageSignature(bytes, type)) ?? "bin";
+                            replacement = Upload(bytes, targetCollection, project, upload, extension);
                         }
                     }
                     cache[key] = replacement;
