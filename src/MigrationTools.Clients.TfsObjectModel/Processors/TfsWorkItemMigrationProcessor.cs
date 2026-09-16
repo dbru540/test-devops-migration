@@ -1825,12 +1825,9 @@ namespace MigrationTools.Processors
                     // Marker-based match: check if already synced
                     if (!string.IsNullOrEmpty(commentId) && syncedMap.TryGetValue(commentId, out var targetCopy))
                     {
-                        // Check if source was modified after the target copy was created
-                        string srcModifiedStr = sc["modifiedDate"]?.ToString();
-                        string tgtCreatedStr = targetCopy["createdDate"]?.ToString();
-                        if (DateTime.TryParse(srcModifiedStr, null, System.Globalization.DateTimeStyles.RoundtripKind, out DateTime srcModified)
-                            && DateTime.TryParse(tgtCreatedStr, null, System.Globalization.DateTimeStyles.RoundtripKind, out DateTime tgtCreated)
-                            && srcModified > tgtCreated)
+                        // Compare against the last successful copy/update, not its
+                        // creation date, otherwise every later event recopies edited images.
+                        if (ShouldUpdateSyncedComment(sc, targetCopy))
                         {
                             modified.Add((sc, targetCopy));
                         }
@@ -1976,6 +1973,14 @@ namespace MigrationTools.Processors
                     new Dictionary<string, object>() { { "TargetWorkItemId", targetWorkItem.Id }, { "ErrorMessage", ex.Message } });
                 throw new InvalidOperationException("Comment synchronization failed", ex);
             }
+        }
+
+        private static bool ShouldUpdateSyncedComment(JToken source, JToken target)
+        {
+            DateTimeOffset? modified = source["modifiedDate"]?.ToObject<DateTimeOffset?>();
+            DateTimeOffset? copied = target["modifiedDate"]?.ToObject<DateTimeOffset?>()
+                ?? target["createdDate"]?.ToObject<DateTimeOffset?>();
+            return modified.HasValue && copied.HasValue && modified.Value > copied.Value;
         }
 
         private readonly IDictionary<string, string> _commentAttachmentCache = new Dictionary<string, string>();

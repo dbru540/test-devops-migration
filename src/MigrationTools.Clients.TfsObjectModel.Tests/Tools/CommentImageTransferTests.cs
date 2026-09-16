@@ -147,5 +147,18 @@ namespace MigrationTools.Clients.TfsObjectModel.Tests.Tools
             }
             finally { File.Delete(path); }
         }
+
+        [TestMethod, TestCategory("L0")]
+        public void EditedCommentIsNotRecopiedAfterItsLatestSuccessfulUpdate()
+        {
+            var method = typeof(TfsWorkItemMigrationProcessor).GetMethod("ShouldUpdateSyncedComment", BindingFlags.NonPublic|BindingFlags.Static);
+            var source = Newtonsoft.Json.Linq.JObject.Parse("{\"modifiedDate\":\"2026-09-16T12:00:00Z\"}");
+            var target = Newtonsoft.Json.Linq.JObject.Parse("{\"createdDate\":\"2026-09-15T12:00:00Z\",\"modifiedDate\":\"2026-09-16T12:05:00Z\"}");
+            Assert.IsFalse((bool)method.Invoke(null, new object[] {source,target}));
+            source["modifiedDate"] = "2026-09-16T12:10:00Z";
+            Assert.IsTrue((bool)method.Invoke(null, new object[] {source,target}));
+            target.Remove("modifiedDate");
+            Assert.IsTrue((bool)method.Invoke(null, new object[] {source,target}));
+        }
     }
 }
