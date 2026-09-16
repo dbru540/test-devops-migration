@@ -73,7 +73,7 @@ namespace MigrationTools.Tools
                             byte[] bytes = output.ToArray();
                             string extension = new[] { "png", "jpeg", "gif", "webp" }.FirstOrDefault(type => HasImageSignature(bytes, type)) ?? "bin";
                             var nameMatch = Regex.Match(new Uri(original).Query, @"(?:\?|&)fileName=([^&]+)", RegexOptions.IgnoreCase);
-                            string fileName = nameMatch.Success ? Uri.UnescapeDataString(nameMatch.Groups[1].Value)
+                            string fileName = nameMatch.Success ? WebUtility.UrlDecode(nameMatch.Groups[1].Value)
                                 : response.Content.Headers.ContentDisposition?.FileNameStar ?? response.Content.Headers.ContentDisposition?.FileName;
                             if (!string.IsNullOrWhiteSpace(fileName))
                                 fileName = fileName.Trim('"').Replace('\\', '/').Split('/').Last();
